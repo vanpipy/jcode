@@ -1315,6 +1315,42 @@ pub(super) async fn handle_client(
             }
         };
 
+        // A cancellation request must never be gated on writing an Ack to the client.
+        // The normal Ack path takes the shared outbound writer before dispatching the
+        // request. During heavy streaming, history replay, or client-side backpressure,
+        // that writer can be busy long enough that an already-decoded cancel would sit
+        // behind outbound bytes instead of signalling the agent's lock-free cancel
+        // handle. Queue the Ack through the event channel and signal cancellation first.
+        if let Request::Cancel { id } = request {
+            let _ = client_event_tx.send(ServerEvent::Ack { id });
+            cancel_processing_message(
+                &mut ProcessingState {
+                    client_is_processing: &mut client_is_processing,
+                    message_id: &mut processing_message_id,
+                    session_id: &mut processing_session_id,
+                    task: &mut processing_task,
+                },
+                &session_control,
+                &client_event_tx,
+                &SwarmStatusRefs {
+                    members: &swarm_members,
+                    swarms_by_id: &swarms_by_id,
+                    event_history: &event_history,
+                    event_counter: &event_counter,
+                    event_tx: &swarm_event_tx,
+                },
+            )
+            .await;
+            if !client_is_processing {
+                let mut connections = client_connections.write().await;
+                if let Some(info) = connections.get_mut(&client_connection_id) {
+                    info.is_processing = false;
+                    info.current_tool_name = None;
+                }
+            }
+            continue;
+        }
+
         // Send ack
         let ack = ServerEvent::Ack { id: request.id() };
         let json = encode_event(&ack);
