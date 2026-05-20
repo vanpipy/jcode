@@ -1,6 +1,7 @@
 use super::animation::{FOCUS_PULSE_DURATION, VIEWPORT_ANIMATION_DURATION};
 use super::single_session::*;
 use super::*;
+use std::sync::Mutex;
 
 #[test]
 fn desktop_frame_profile_is_opt_in_and_recognizes_trace_modes() {
@@ -92,6 +93,64 @@ fn desktop_hot_reload_drops_resume_when_current_app_is_fresh() {
     let updated = relaunch.for_app(&app, PathBuf::from("/new/jcode-desktop"));
 
     assert_eq!(updated.args, vec![OsString::from("--fullscreen")]);
+}
+
+#[test]
+fn desktop_hot_reload_persists_workspace_focus_before_spawn() -> Result<()> {
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    let Ok(_guard) = ENV_LOCK.lock() else {
+        anyhow::bail!("desktop hot reload env lock poisoned");
+    };
+    let temp = unique_desktop_test_dir("desktop-hot-reload-workspace-state")?;
+    let state_path = temp.join("desktop-state.json");
+    unsafe {
+        std::env::set_var("JCODE_DESKTOP_STATE", &state_path);
+    }
+
+    let relaunch = DesktopRelaunch {
+        binary: PathBuf::from("/old/jcode-desktop"),
+        args: vec![OsString::from("--workspace")],
+    };
+    let cards = vec![
+        workspace::SessionCard {
+            session_id: "session-a".to_string(),
+            title: "alpha".to_string(),
+            subtitle: "active".to_string(),
+            detail: "1 message".to_string(),
+            preview_lines: vec![],
+            detail_lines: vec![],
+        },
+        workspace::SessionCard {
+            session_id: "session-b".to_string(),
+            title: "bravo".to_string(),
+            subtitle: "active".to_string(),
+            detail: "2 messages".to_string(),
+            preview_lines: vec![],
+            detail_lines: vec![],
+        },
+    ];
+    let mut workspace = Workspace::from_session_cards(cards);
+    workspace.apply_preferences(workspace::DesktopPreferences {
+        panel_size: PanelSizePreset::ThreeQuarter,
+        focused_session_id: Some("session-b".to_string()),
+        workspace_lane: 0,
+        space_hold_toggle_ms: 333,
+    });
+    let app = DesktopApp::Workspace(workspace);
+
+    let updated = relaunch.for_app(&app, PathBuf::from("/new/jcode-desktop"));
+
+    assert_eq!(updated.args, vec![OsString::from("--workspace")]);
+    let saved = desktop_prefs::load_preferences()?.expect("workspace preferences saved");
+    assert_eq!(saved.focused_session_id.as_deref(), Some("session-b"));
+    assert_eq!(saved.panel_size, PanelSizePreset::ThreeQuarter);
+    assert_eq!(saved.space_hold_toggle_ms, 333);
+
+    unsafe {
+        std::env::remove_var("JCODE_DESKTOP_STATE");
+    }
+    std::fs::remove_dir_all(temp)?;
+    Ok(())
 }
 
 #[test]

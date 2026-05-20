@@ -3911,6 +3911,14 @@ impl DesktopRelaunch {
     }
 
     fn for_app(&self, app: &DesktopApp, binary: PathBuf) -> Self {
+        if let DesktopApp::Workspace(workspace) = app
+            && let Err(error) = desktop_prefs::save_preferences(&workspace.preferences())
+        {
+            desktop_log::error(format_args!(
+                "jcode-desktop: failed to persist workspace state before hot reload: {error:#}"
+            ));
+        }
+
         let mut args = desktop_args_without_resume(&self.args);
         if let Some(session_id) = app.single_session_live_id() {
             args.push(OsString::from("--resume"));
