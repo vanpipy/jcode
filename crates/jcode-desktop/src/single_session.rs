@@ -147,11 +147,14 @@ const DESKTOP_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/model [name]", "open model picker or switch to a model"),
     ("/models", "alias for /model"),
     ("/refresh-model-list", "refresh provider model catalogs"),
+    ("/reload", "force reload the desktop window using handoff"),
+    ("/force-reload", "alias for /reload"),
     ("/effort [level]", "show or change reasoning effort"),
     (
         "/font [user|ai] [name]",
         "show or hot-swap desktop transcript fonts",
     ),
+    ("/fonts", "alias for /font"),
     ("/fast [on|off|status]", "show or toggle OpenAI fast mode"),
     ("/transport [mode]", "show or change OpenAI transport"),
     (
@@ -171,6 +174,7 @@ const DESKTOP_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/stop", "interrupt the running generation"),
     ("/cancel", "alias for /stop"),
     ("/status", "show current desktop session status"),
+    ("/info", "alias for /status"),
     ("/quit", "exit the desktop app"),
     ("/exit", "alias for /quit"),
 ];
@@ -3375,6 +3379,15 @@ impl SingleSessionApp {
                 ));
                 KeyOutcome::RefreshModelCatalog
             }
+            "/reload" | "/force-reload" => {
+                self.draft.clear();
+                self.draft_cursor = 0;
+                self.composer.input_undo_stack.clear();
+                self.set_status(SingleSessionStatus::Info(
+                    "force reloading desktop".to_string(),
+                ));
+                KeyOutcome::ForceReload
+            }
             "/effort" => {
                 self.draft.clear();
                 self.draft_cursor = 0;
@@ -3651,7 +3664,7 @@ impl SingleSessionApp {
                     KeyOutcome::Redraw
                 }
             }
-            "/status" => {
+            "/status" | "/info" => {
                 self.draft.clear();
                 self.draft_cursor = 0;
                 self.composer.input_undo_stack.clear();

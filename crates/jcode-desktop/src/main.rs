@@ -1204,6 +1204,14 @@ async fn run() -> Result<()> {
                             window.set_title(&app.status_title());
                             window.request_redraw();
                         }
+                        KeyOutcome::ForceReload => {
+                            if hot_reloader.force_reload(&app, &window) {
+                                target.exit();
+                            } else {
+                                window.set_title(&app.status_title());
+                                window.request_redraw();
+                            }
+                        }
                         KeyOutcome::None => {}
                     }
                     log_desktop_slow_interaction(
@@ -4605,6 +4613,39 @@ impl DesktopHotReloader {
             }
         }
         false
+    }
+
+    fn force_reload(&mut self, app: &DesktopApp, window: &Window) -> bool {
+        if self.poll_pending_handoff() {
+            return true;
+        }
+        if self.pending_handoff.is_some() {
+            desktop_log::warn(format_args!(
+                "jcode-desktop: force reload requested while another reload handoff is pending"
+            ));
+            return false;
+        }
+        let Some(relaunch) = self.relaunch.as_ref() else {
+            desktop_log::warn(format_args!(
+                "jcode-desktop: force reload requested but current process cannot be relaunched"
+            ));
+            return false;
+        };
+        let binary = desktop_reload_binary_candidate(&relaunch.binary);
+        let relaunch = relaunch.for_app(app, binary);
+        match relaunch.spawn_for_window(window) {
+            Ok(Some(handoff)) => {
+                self.pending_handoff = Some(handoff);
+                false
+            }
+            Ok(None) => true,
+            Err(error) => {
+                desktop_log::error(format_args!(
+                    "jcode-desktop: failed to force reload desktop: {error:#}"
+                ));
+                false
+            }
+        }
     }
 
     fn poll_pending_handoff(&mut self) -> bool {
