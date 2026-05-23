@@ -174,10 +174,10 @@ bing_market = "en-US"
 profile = "full"
 # Explicit allow-list. When non-empty, only these tools are exposed.
 # enabled = ["bash", "read", "write", "apply_patch", "agentgrep", "ls"]
-# Privacy-sensitive tools such as gmail are disabled by default.
-# To expose every tool including gmail, use: enabled = ["*"]
+# Privacy-sensitive or stub tools such as gmail and lsp are disabled by default.
+# To expose every tool including default-disabled tools, use: enabled = ["*"]
 # Hide selected tools after applying the profile/allow-list.
-# disabled = ["browser", "gmail", "swarm"]
+# disabled = ["browser", "gmail", "lsp", "swarm"]
 # Disable all built-in tools unless enabled is set.
 disable_base_tools = false
 

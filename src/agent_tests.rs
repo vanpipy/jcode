@@ -495,16 +495,18 @@ async fn default_disabled_tools_are_not_exposed_or_executable() {
     let mut agent = Agent::new(provider, registry);
     let definitions = agent.tool_definitions().await;
 
-    assert!(
-        !definitions
-            .iter()
-            .any(|definition| definition.name == "gmail"),
-        "default-disabled gmail tool must not be sent in model-visible tool definitions"
-    );
-    let err = agent
-        .validate_tool_allowed("gmail")
-        .expect_err("default-disabled gmail tool must not be executable");
-    assert!(err.to_string().contains("disabled"));
+    for tool_name in ["gmail", "lsp"] {
+        assert!(
+            !definitions
+                .iter()
+                .any(|definition| definition.name == tool_name),
+            "default-disabled {tool_name} tool must not be sent in model-visible tool definitions"
+        );
+        let err = agent.validate_tool_allowed(tool_name).expect_err(&format!(
+            "default-disabled {tool_name} tool must not be executable"
+        ));
+        assert!(err.to_string().contains("disabled"));
+    }
 
     if let Some(previous) = prev_home {
         crate::env::set_var("JCODE_HOME", previous);

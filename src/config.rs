@@ -404,7 +404,7 @@ pub struct ToolSelection {
 }
 
 impl ToolConfig {
-    const DEFAULT_DISABLED_TOOLS: &'static [&'static str] = &["gmail"];
+    const DEFAULT_DISABLED_TOOLS: &'static [&'static str] = &["gmail", "lsp"];
 
     pub fn selection(&self) -> ToolSelection {
         let mut allowed_tools = self.base_allowed_tools();
