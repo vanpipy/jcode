@@ -1,7 +1,9 @@
 use super::animation::{
-    AnimatedRect, ColorTransition, FOCUS_PULSE_DURATION, STATUS_COLOR_TRANSITION_DURATION,
-    SURFACE_TRANSITION_DURATION, SurfaceTransitionAnimator, SurfaceVisualFrame,
-    SurfaceVisualTarget, VIEWPORT_ANIMATION_DURATION,
+    AnimatedRect, ColorTransition, DESKTOP_REDUCED_MOTION_ENV, DesktopReducedMotionEnvGuard,
+    FOCUS_PULSE_DURATION, STATUS_COLOR_TRANSITION_DURATION, SURFACE_TRANSITION_DURATION,
+    SurfaceTransitionAnimator, SurfaceVisualFrame, SurfaceVisualTarget,
+    VIEWPORT_ANIMATION_DURATION, desktop_reduced_motion_enabled,
+    desktop_reduced_motion_enabled_for_env_value,
 };
 use super::single_session::*;
 use super::*;
@@ -40,6 +42,33 @@ fn desktop_config_parses_positive_millisecond_durations_only() {
     assert_eq!(parse_positive_duration_millis("NaN"), None);
     assert_eq!(parse_positive_duration_millis("inf"), None);
     assert_eq!(parse_positive_duration_millis("nope"), None);
+}
+
+#[test]
+fn desktop_reduced_motion_env_parses_common_flag_values() {
+    assert!(!desktop_reduced_motion_enabled_for_env_value(None));
+    assert!(!desktop_reduced_motion_enabled_for_env_value(Some(
+        OsString::from("")
+    )));
+    assert!(!desktop_reduced_motion_enabled_for_env_value(Some(
+        OsString::from("0")
+    )));
+    assert!(!desktop_reduced_motion_enabled_for_env_value(Some(
+        OsString::from("false")
+    )));
+    assert!(!desktop_reduced_motion_enabled_for_env_value(Some(
+        OsString::from("off")
+    )));
+    assert!(desktop_reduced_motion_enabled_for_env_value(Some(
+        OsString::from("1")
+    )));
+    assert!(desktop_reduced_motion_enabled_for_env_value(Some(
+        OsString::from("true")
+    )));
+    assert!(desktop_reduced_motion_enabled_for_env_value(Some(
+        OsString::from("reduce")
+    )));
+    assert_eq!(DESKTOP_REDUCED_MOTION_ENV, "JCODE_DESKTOP_REDUCED_MOTION");
 }
 
 #[test]
@@ -828,6 +857,41 @@ fn viewport_animation_interpolates_to_new_layout_target() {
 }
 
 #[test]
+fn reduced_motion_snaps_viewport_to_new_layout_target() {
+    let _guard = DesktopReducedMotionEnvGuard::set(true);
+    assert!(desktop_reduced_motion_enabled());
+
+    let mut animation = AnimatedViewport::default();
+    let now = Instant::now();
+    let visible = VisibleColumnLayout {
+        visible_columns: 2,
+        first_visible_column: 0,
+    };
+    let start = WorkspaceRenderLayout {
+        visible,
+        column_width: 200.0,
+        scroll_offset: 0.0,
+        vertical_scroll_offset: 0.0,
+    };
+    let target = WorkspaceRenderLayout {
+        visible: VisibleColumnLayout {
+            visible_columns: 2,
+            first_visible_column: 2,
+        },
+        column_width: 300.0,
+        scroll_offset: 600.0,
+        vertical_scroll_offset: 800.0,
+    };
+
+    assert_eq!(animation.frame(start, now).column_width, 200.0);
+    let snapped = animation.frame(target, now);
+    assert_eq!(snapped.column_width, 300.0);
+    assert_eq!(snapped.scroll_offset, 600.0);
+    assert_eq!(snapped.vertical_scroll_offset, 800.0);
+    assert!(!animation.is_animating());
+}
+
+#[test]
 fn focus_pulse_runs_when_focused_surface_changes() {
     let mut pulse = FocusPulse::default();
     let now = Instant::now();
@@ -845,6 +909,17 @@ fn focus_pulse_runs_when_focused_surface_changes() {
 
     let end = pulse.frame(2, now + FOCUS_PULSE_DURATION);
     assert_eq!(end, 0.0);
+    assert!(!pulse.is_animating());
+}
+
+#[test]
+fn reduced_motion_disables_focus_pulse() {
+    let _guard = DesktopReducedMotionEnvGuard::set(true);
+    let mut pulse = FocusPulse::default();
+    let now = Instant::now();
+
+    assert_eq!(pulse.frame(1, now), 0.0);
+    assert_eq!(pulse.frame(2, now), 0.0);
     assert!(!pulse.is_animating());
 }
 
@@ -955,6 +1030,43 @@ fn surface_transition_animates_panel_exit_before_removal() {
         now + Duration::from_millis(8) + SURFACE_TRANSITION_DURATION * 2,
     );
     assert!(finished.is_empty());
+    assert!(!transitions.is_animating());
+}
+
+#[test]
+fn reduced_motion_snaps_surface_entries_moves_and_exits() {
+    let _guard = DesktopReducedMotionEnvGuard::set(true);
+    let mut transitions = SurfaceTransitionAnimator::default();
+    let now = Instant::now();
+    let original = SurfaceVisualTarget {
+        id: 1,
+        rect: AnimatedRect {
+            x: 16.0,
+            y: 24.0,
+            width: 140.0,
+            height: 180.0,
+        },
+    };
+    let moved = SurfaceVisualTarget {
+        id: 1,
+        rect: AnimatedRect {
+            x: 80.0,
+            y: 40.0,
+            width: 160.0,
+            height: 200.0,
+        },
+    };
+
+    transitions.frame([original], now);
+    let snapped = transitions.frame([moved], now);
+    let snapped = surface_visual_frame(&snapped, 1);
+    assert_eq!(snapped.rect, moved.rect);
+    assert_eq!(snapped.opacity, 1.0);
+    assert!(!snapped.exiting);
+    assert!(!transitions.is_animating());
+
+    let removed = transitions.frame([], now + Duration::from_millis(1));
+    assert!(removed.is_empty());
     assert!(!transitions.is_animating());
 }
 
@@ -1081,6 +1193,24 @@ fn color_transition_interpolates_status_bar_mode_changes() {
         insert
     );
     assert!(!transition.is_animating());
+}
+
+#[test]
+fn reduced_motion_snaps_color_and_streaming_text_arrival() {
+    let _guard = DesktopReducedMotionEnvGuard::set(true);
+    let mut transition = ColorTransition::default();
+    let now = Instant::now();
+    let nav = [0.10, 0.20, 0.30, 1.0];
+    let insert = [0.40, 0.50, 0.60, 1.0];
+
+    assert_eq!(transition.frame(nav, now), nav);
+    assert_eq!(transition.frame(insert, now), insert);
+    assert!(!transition.is_animating());
+
+    let style = streaming_text_arrival_style_for_elapsed(Duration::ZERO);
+    assert_eq!(style.opacity, 1.0);
+    assert_eq!(style.y_offset_pixels, 0.0);
+    assert!(!style.active);
 }
 
 fn surface_visual_frame(frames: &[SurfaceVisualFrame], id: u64) -> SurfaceVisualFrame {

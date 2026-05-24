@@ -426,6 +426,10 @@ pub(crate) fn welcome_hero_reveal_progress_for_elapsed(elapsed: Duration) -> f32
     const REVEAL_DURATION: Duration = Duration::from_millis(1350);
     const FIRST_INK_PROGRESS: f32 = 0.018;
 
+    if crate::animation::desktop_reduced_motion_enabled() {
+        return 1.0;
+    }
+
     let raw = (elapsed.as_secs_f32() / REVEAL_DURATION.as_secs_f32()).clamp(0.0, 1.0);
     if raw >= 1.0 {
         return 1.0;
@@ -1728,7 +1732,8 @@ impl ToolCardMotionRegistry {
     ) -> ToolCardMotionFrame {
         self.generation = self.generation.wrapping_add(1).max(1);
         let generation = self.generation;
-        let animate_new_cards = self.initialized;
+        let reduced_motion = crate::animation::desktop_reduced_motion_enabled();
+        let animate_new_cards = self.initialized && !reduced_motion;
         self.initialized = true;
 
         let mut visuals = HashMap::new();
@@ -1787,8 +1792,9 @@ impl ToolCardMotionRegistry {
 
             state.last_run = run.clone();
 
-            let (visual, visual_active) = tool_card_visual_from_state(state, &run, now, tick);
-            active |= visual_active || run.active || run.state.is_active();
+            let (visual, visual_active) =
+                tool_card_visual_from_state(state, &run, now, tick, reduced_motion);
+            active |= visual_active || (!reduced_motion && (run.active || run.state.is_active()));
             visuals.insert(run.call_id, visual);
         }
 
@@ -1977,6 +1983,14 @@ impl SingleSessionScrollbarMotionRegistry {
             return (0.0, false);
         };
         let elapsed = now.saturating_duration_since(last_activity_at);
+        if crate::animation::desktop_reduced_motion_enabled() {
+            let opacity = if elapsed <= SINGLE_SESSION_SCROLLBAR_FADE_IDLE_DURATION {
+                1.0
+            } else {
+                0.0
+            };
+            return (opacity, false);
+        }
         if elapsed <= SINGLE_SESSION_SCROLLBAR_FADE_IDLE_DURATION {
             return (1.0, true);
         }
@@ -2041,6 +2055,7 @@ fn tool_card_visual_from_state(
     run: &SingleSessionToolCardRun,
     now: Instant,
     tick: u64,
+    reduced_motion: bool,
 ) -> (ToolCardVisual, bool) {
     let target_palette = tool_card_palette(run.state, run.active);
     let mut palette = target_palette;
@@ -2108,8 +2123,16 @@ fn tool_card_visual_from_state(
         }
     }
 
-    let pulse = active_tool_card_pulse(tick);
-    let active_phase = (tick % 18) as f32 / 18.0;
+    let pulse = if reduced_motion {
+        0.0
+    } else {
+        active_tool_card_pulse(tick)
+    };
+    let active_phase = if reduced_motion {
+        0.0
+    } else {
+        (tick % 18) as f32 / 18.0
+    };
     if run.active || run.state.is_active() {
         palette.background[3] = (palette.background[3] + 0.08 * pulse).clamp(0.0, 0.82);
         palette.border[3] = (palette.border[3] + 0.16 * pulse).clamp(0.0, 0.62);
@@ -2149,7 +2172,7 @@ fn exiting_tool_card_visual(
 }
 
 fn timed_animation_progress(started_at: Instant, now: Instant, duration: Duration) -> (f32, bool) {
-    if duration.is_zero() {
+    if duration.is_zero() || crate::animation::desktop_reduced_motion_enabled() {
         return (1.0, false);
     }
     let progress = (now.saturating_duration_since(started_at).as_secs_f32()
@@ -6395,6 +6418,67 @@ mod tests {
     }
 
     #[test]
+    fn reduced_motion_snaps_tool_card_entry_state_and_grouping() {
+        let _guard = crate::animation::DesktopReducedMotionEnvGuard::set(true);
+        let mut registry = ToolCardMotionRegistry::default();
+        let now = Instant::now();
+        let first = test_tool_line(
+            "call-a",
+            SingleSessionToolVisualState::Running,
+            true,
+            SingleSessionToolLineKind::Header,
+        );
+        let second = test_tool_line(
+            "call-b",
+            SingleSessionToolVisualState::Succeeded,
+            false,
+            SingleSessionToolLineKind::Header,
+        );
+        let done = test_tool_line(
+            "call-a",
+            SingleSessionToolVisualState::Succeeded,
+            false,
+            SingleSessionToolLineKind::Header,
+        );
+        let group = test_tool_line(
+            "tool-group",
+            SingleSessionToolVisualState::Group,
+            false,
+            SingleSessionToolLineKind::GroupSummary,
+        );
+
+        let initial = registry.frame(std::slice::from_ref(&first), now, 9);
+        let initial_visual = initial.visual_for("call-a").expect("initial visual");
+        assert_eq!(initial_visual.opacity, 1.0);
+        assert_eq!(initial_visual.active_phase, 0.0);
+        assert!(!initial.is_active());
+
+        let added = registry.frame(&[done.clone(), second], now + Duration::from_millis(5), 10);
+        let done_visual = added.visual_for("call-a").expect("done visual");
+        let second_visual = added.visual_for("call-b").expect("second visual");
+        assert_eq!(done_visual.flash_alpha, 0.0);
+        assert_eq!(second_visual.opacity, 1.0);
+        assert_eq!(second_visual.y_offset_pixels, 0.0);
+        assert_eq!(second_visual.scale, 1.0);
+        assert!(!added.is_active());
+
+        let grouped = registry.frame(
+            std::slice::from_ref(&group),
+            now + Duration::from_millis(10),
+            11,
+        );
+        assert!(grouped.exiting().is_empty());
+        assert_eq!(
+            grouped
+                .visual_for("tool-group")
+                .expect("group visual")
+                .opacity,
+            1.0
+        );
+        assert!(!grouped.is_active());
+    }
+
+    #[test]
     fn scrollbar_motion_animates_thumb_position() {
         let mut registry = SingleSessionScrollbarMotionRegistry::default();
         let size = PhysicalSize::new(900, 720);
@@ -6485,6 +6569,46 @@ mod tests {
         let cleared = registry.frame_for_metrics(size, 0.0, None, now + Duration::from_millis(16));
         assert!(cleared.visual().is_none());
         assert!(!cleared.is_active());
+    }
+
+    #[test]
+    fn reduced_motion_snaps_scrollbar_and_welcome_reveal() {
+        let _guard = crate::animation::DesktopReducedMotionEnvGuard::set(true);
+        let mut registry = SingleSessionScrollbarMotionRegistry::default();
+        let size = PhysicalSize::new(900, 720);
+        let now = Instant::now();
+        let top = test_scroll_metrics(120, 30, 0.0, 90);
+        let bottom = test_scroll_metrics(120, 30, 90.0, 90);
+
+        registry.frame_for_metrics(size, 0.0, Some(top), now);
+        let snapped =
+            registry.frame_for_metrics(size, 0.0, Some(bottom), now + Duration::from_millis(5));
+        let snapped_visual = snapped.visual().expect("snapped visual");
+        assert_eq!(
+            snapped_visual.thumb_y,
+            single_session_scrollbar_geometry(size, 0.0, bottom).thumb_y
+        );
+        assert_eq!(snapped_visual.opacity, 1.0);
+        assert!(!snapped.is_active());
+
+        let hidden = registry.frame_for_metrics(
+            size,
+            0.0,
+            Some(bottom),
+            now + Duration::from_millis(5)
+                + SINGLE_SESSION_SCROLLBAR_FADE_IDLE_DURATION
+                + Duration::from_millis(1),
+        );
+        assert!(hidden.visual().is_none());
+        assert!(!hidden.is_active());
+
+        assert_eq!(
+            welcome_hero_reveal_progress_for_elapsed(Duration::ZERO),
+            1.0
+        );
+        assert!(!welcome_hero_reveal_is_active(
+            welcome_hero_reveal_progress_for_elapsed(Duration::ZERO)
+        ));
     }
 
     fn test_scroll_metrics(

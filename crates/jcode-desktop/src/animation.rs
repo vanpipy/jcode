@@ -5,11 +5,58 @@ pub(crate) const VIEWPORT_ANIMATION_DURATION: Duration = Duration::from_millis(1
 pub(crate) const FOCUS_PULSE_DURATION: Duration = Duration::from_millis(180);
 pub(crate) const SURFACE_TRANSITION_DURATION: Duration = Duration::from_millis(180);
 pub(crate) const STATUS_COLOR_TRANSITION_DURATION: Duration = Duration::from_millis(140);
+pub(crate) const DESKTOP_REDUCED_MOTION_ENV: &str = "JCODE_DESKTOP_REDUCED_MOTION";
 const VIEWPORT_ANIMATION_EPSILON: f32 = 0.5;
 const SURFACE_TRANSITION_EPSILON: f32 = 0.5;
 const SURFACE_ENTRY_OFFSET_PIXELS: f32 = 24.0;
 const SURFACE_EXIT_OFFSET_PIXELS: f32 = 18.0;
 const SURFACE_ENTRY_SCALE: f32 = 0.965;
+
+pub(crate) fn desktop_reduced_motion_enabled_for_env_value(
+    value: Option<std::ffi::OsString>,
+) -> bool {
+    value.is_some_and(crate::desktop_config::env_flag_enabled)
+}
+
+pub(crate) fn desktop_reduced_motion_enabled() -> bool {
+    #[cfg(test)]
+    if let Some(enabled) = DESKTOP_REDUCED_MOTION_TEST_OVERRIDE.with(|override_| override_.get()) {
+        return enabled;
+    }
+
+    desktop_reduced_motion_enabled_for_env_value(std::env::var_os(DESKTOP_REDUCED_MOTION_ENV))
+}
+
+#[cfg(test)]
+thread_local! {
+    static DESKTOP_REDUCED_MOTION_TEST_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
+}
+
+#[cfg(test)]
+pub(crate) struct DesktopReducedMotionEnvGuard {
+    previous: Option<bool>,
+}
+
+#[cfg(test)]
+impl DesktopReducedMotionEnvGuard {
+    pub(crate) fn set(enabled: bool) -> Self {
+        let previous = DESKTOP_REDUCED_MOTION_TEST_OVERRIDE.with(|override_| {
+            let previous = override_.get();
+            override_.set(Some(enabled));
+            previous
+        });
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DesktopReducedMotionEnvGuard {
+    fn drop(&mut self) {
+        DESKTOP_REDUCED_MOTION_TEST_OVERRIDE.with(|override_| override_.set(self.previous));
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct VisibleColumnLayout {
@@ -54,6 +101,20 @@ impl AnimatedViewport {
             self.target_column_width = target.column_width;
             self.target_scroll_offset = target.scroll_offset;
             self.target_vertical_scroll_offset = target.vertical_scroll_offset;
+            return target;
+        }
+
+        if desktop_reduced_motion_enabled() {
+            self.start_column_width = target.column_width;
+            self.start_scroll_offset = target.scroll_offset;
+            self.start_vertical_scroll_offset = target.vertical_scroll_offset;
+            self.current_column_width = target.column_width;
+            self.current_scroll_offset = target.scroll_offset;
+            self.current_vertical_scroll_offset = target.vertical_scroll_offset;
+            self.target_column_width = target.column_width;
+            self.target_scroll_offset = target.scroll_offset;
+            self.target_vertical_scroll_offset = target.vertical_scroll_offset;
+            self.started_at = None;
             return target;
         }
 
@@ -216,6 +277,24 @@ impl SurfaceTransitionAnimator {
         targets: impl IntoIterator<Item = SurfaceVisualTarget>,
         now: Instant,
     ) -> Vec<SurfaceVisualFrame> {
+        let targets = targets.into_iter().collect::<Vec<_>>();
+
+        if desktop_reduced_motion_enabled() {
+            self.initialized = true;
+            self.generation = self.generation.wrapping_add(1).max(1);
+            self.states.clear();
+            return targets
+                .into_iter()
+                .map(|target| SurfaceVisualFrame {
+                    id: target.id,
+                    rect: target.rect,
+                    opacity: 1.0,
+                    exiting: false,
+                    scale: 1.0,
+                })
+                .collect();
+        }
+
         self.generation = self.generation.wrapping_add(1).max(1);
         let generation = self.generation;
         let animate_new_surfaces = self.initialized;
@@ -344,6 +423,14 @@ impl ColorTransition {
             return target;
         }
 
+        if desktop_reduced_motion_enabled() {
+            self.start = target;
+            self.current = target;
+            self.target = target;
+            self.started_at = None;
+            return target;
+        }
+
         if color_target_changed(self.target, target) {
             self.start = self.current;
             self.target = target;
@@ -385,6 +472,12 @@ pub(crate) struct FocusPulse {
 
 impl FocusPulse {
     pub(crate) fn frame(&mut self, focused_id: u64, now: Instant) -> f32 {
+        if desktop_reduced_motion_enabled() {
+            self.last_focused_id = Some(focused_id);
+            self.started_at = None;
+            return 0.0;
+        }
+
         match self.last_focused_id {
             None => {
                 self.last_focused_id = Some(focused_id);

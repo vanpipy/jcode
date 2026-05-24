@@ -379,6 +379,14 @@ struct StreamingTextArrivalStyle {
 }
 
 fn streaming_text_arrival_style_for_elapsed(elapsed: Duration) -> StreamingTextArrivalStyle {
+    if animation::desktop_reduced_motion_enabled() {
+        return StreamingTextArrivalStyle {
+            opacity: 1.0,
+            y_offset_pixels: 0.0,
+            active: false,
+        };
+    }
+
     let progress =
         (elapsed.as_secs_f32() / STREAMING_TEXT_FADE_DURATION.as_secs_f32()).clamp(0.0, 1.0);
     if progress >= 1.0 {
