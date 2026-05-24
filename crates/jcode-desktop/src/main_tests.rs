@@ -3611,8 +3611,8 @@ fn assistant_inline_code_pill_matches_glyphon_layout_after_narrow_wrap() {
     assert!(
         body_lines
             .iter()
-            .any(|line| line.text == "format inline code like a variable"),
-        "narrow fixture should exercise a line that glyphon used to re-wrap"
+            .any(|line| line.text.contains("format inline code")),
+        "narrow fixture should exercise wrapped prose before the inline-code row"
     );
     let code_line_index = body_lines
         .iter()
@@ -3688,6 +3688,31 @@ fn assistant_inline_code_pill_matches_glyphon_layout_after_narrow_wrap() {
             height: card_height,
         },
         "narrow inline code pill",
+    );
+}
+
+#[test]
+fn single_session_cached_body_layout_is_not_reused_across_width_resize() {
+    let wide = PhysicalSize::new(1600, 900);
+    let narrow = PhysicalSize::new(720, 900);
+    let height_only_resize = PhysicalSize::new(1600, 895);
+    let scale = 1.0;
+
+    assert!(
+        single_session_body_text_buffer_layout_compatible(
+            (wide.width, wide.height),
+            height_only_resize,
+            scale
+        ),
+        "minor height-only resizes that keep the same visible-line bucket may reuse cached body glyphs"
+    );
+    assert!(
+        !single_session_body_text_buffer_layout_compatible(
+            (wide.width, wide.height),
+            narrow,
+            scale
+        ),
+        "horizontal resizes must rebuild the body buffer so wrapping and text bounds match the new window width"
     );
 }
 

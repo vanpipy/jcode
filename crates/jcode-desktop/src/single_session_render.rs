@@ -3036,9 +3036,11 @@ pub(crate) fn single_session_body_text_buffer_layout_compatible(
 
 fn single_session_body_text_buffer_layout_bucket(size: (u32, u32), text_scale: f32) -> (u32, u32) {
     let physical_size = PhysicalSize::new(size.0, size.1);
+    let width_columns =
+        single_session_body_max_columns(physical_size, text_scale).min(u32::MAX as usize) as u32;
     let height_lines = single_session_body_text_buffer_layout_lines(physical_size, text_scale)
         .min(u32::MAX as usize) as u32;
-    (0, height_lines)
+    (width_columns, height_lines)
 }
 
 fn single_session_body_text_buffer_layout_height(size: PhysicalSize<u32>, text_scale: f32) -> f32 {
