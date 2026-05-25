@@ -2073,9 +2073,8 @@ pub(super) fn handle_goals_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 pub(super) fn handle_mission_command(app: &mut App, trimmed: &str) -> bool {
-    let Some(rest) = trimmed
-        .strip_prefix("/mission")
-        .or_else(|| trimmed.strip_prefix("/goal"))
+    let Some(rest) =
+        slash_command_rest(trimmed, "/mission").or_else(|| slash_command_rest(trimmed, "/goal"))
     else {
         return false;
     };
@@ -2148,7 +2147,7 @@ pub(super) fn handle_mission_command(app: &mut App, trimmed: &str) -> bool {
 }
 
 pub(super) fn handle_test_command(app: &mut App, trimmed: &str) -> bool {
-    let Some(rest) = trimmed.strip_prefix("/test") else {
+    let Some(rest) = slash_command_rest(trimmed, "/test") else {
         return false;
     };
     let claim = rest.trim();

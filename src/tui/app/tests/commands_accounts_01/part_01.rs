@@ -519,6 +519,8 @@ fn test_mission_command_sets_and_shows_status() {
     let mut app = create_test_app();
     app.input = "/mission make browser control reliable".to_string();
     app.submit_input();
+    assert!(!app.is_processing, "/mission must not start a stuck Sending turn");
+    assert!(!app.pending_queued_dispatch, "/mission must not queue dispatch by itself");
     assert!(
         app.display_messages()
             .last()
@@ -529,12 +531,39 @@ fn test_mission_command_sets_and_shows_status() {
 
     app.input = "/goal status".to_string();
     app.submit_input();
+    assert!(!app.is_processing, "/goal status must not start a stuck Sending turn");
+    assert!(!app.pending_queued_dispatch, "/goal status must not queue dispatch");
     let msg = app
         .display_messages()
         .last()
         .expect("missing mission status message");
     assert!(msg.content.contains("make browser control reliable"));
     assert!(msg.content.contains("Long-horizon intent"));
+
+    if let Some(prev_home) = prev_home {
+        crate::env::set_var("JCODE_HOME", prev_home);
+    } else {
+        crate::env::remove_var("JCODE_HOME");
+    }
+}
+
+#[test]
+fn test_goals_legacy_alias_is_not_captured_by_goal_mission_alias() {
+    let _guard = crate::storage::lock_test_env();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path().join("repo");
+    std::fs::create_dir_all(&project).expect("project dir");
+    let prev_home = std::env::var_os("JCODE_HOME");
+    crate::env::set_var("JCODE_HOME", temp.path());
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(project.display().to_string());
+    app.input = "/goals".to_string();
+    app.submit_input();
+
+    assert_eq!(app.side_panel.focused_page_id.as_deref(), Some("goals"));
+    let mission = crate::mission::load(&app.session.id).expect("load mission");
+    assert!(mission.is_none(), "/goals should not create a mission named `s`");
 
     if let Some(prev_home) = prev_home {
         crate::env::set_var("JCODE_HOME", prev_home);
