@@ -596,7 +596,13 @@ async fn handle_remote_key_internal(
                 let had_pending = app.retrieve_pending_message_for_edit();
                 if had_pending {
                     let _ = remote.cancel_soft_interrupts().await;
+                } else {
+                    input::handle_prompt_history_navigation(app, code, modifiers);
                 }
+                return Ok(());
+            }
+            KeyCode::Down => {
+                input::handle_prompt_history_navigation(app, code, modifiers);
                 return Ok(());
             }
             _ => {}

@@ -862,8 +862,12 @@ pub(super) fn retrieve_pending_message_for_edit(app: &mut App) -> bool {
         && !msg.is_empty()
     {
         parts.push(msg);
+        had_pending = true;
     }
-    parts.extend(std::mem::take(&mut app.queued_messages));
+    if !app.queued_messages.is_empty() {
+        parts.extend(std::mem::take(&mut app.queued_messages));
+        had_pending = true;
+    }
 
     if !parts.is_empty() {
         app.input = parts.join("\n\n");
@@ -1778,7 +1782,15 @@ impl App {
         self.normalize_diagram_state();
         let diagram_available = self.diagram_available();
 
-        if modifiers == KeyModifiers::CONTROL && matches!(code, KeyCode::Up | KeyCode::Down) {
+        if modifiers == KeyModifiers::CONTROL && code == KeyCode::Up {
+            if retrieve_pending_message_for_edit(self) {
+                return Ok(());
+            }
+            handle_prompt_history_navigation(self, code, modifiers);
+            return Ok(());
+        }
+
+        if modifiers == KeyModifiers::CONTROL && code == KeyCode::Down {
             handle_prompt_history_navigation(self, code, modifiers);
             return Ok(());
         }

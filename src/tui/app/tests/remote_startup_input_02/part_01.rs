@@ -877,9 +877,7 @@ fn test_retrieve_pending_message_edits_queued_message() {
     assert_eq!(app.queued_count(), 1);
     assert!(app.input().is_empty());
 
-    // Pending messages can still be retrieved for editing through the helper;
-    // Ctrl+Up is now reserved for explicit prompt-history navigation.
-    app.retrieve_pending_message_for_edit();
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
 
     assert_eq!(app.queued_count(), 0);
     assert_eq!(app.input(), "hello");

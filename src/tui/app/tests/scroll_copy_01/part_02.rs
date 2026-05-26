@@ -67,6 +67,23 @@ fn test_empty_prompt_up_down_browses_previous_prompts() {
 }
 
 #[test]
+fn test_ctrl_up_browses_history_when_no_pending_message() {
+    let mut app = create_test_app();
+    app.display_messages = vec![
+        DisplayMessage::user("first prompt"),
+        DisplayMessage::assistant("first response"),
+        DisplayMessage::user("second prompt"),
+    ];
+    app.bump_display_messages_version();
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "second prompt");
+
+    app.handle_key(KeyCode::Up, KeyModifiers::CONTROL).unwrap();
+    assert_eq!(app.input, "first prompt");
+}
+
+#[test]
 fn test_prompt_history_up_does_not_replace_unmatched_draft() {
     let mut app = create_test_app();
     app.display_messages = vec![DisplayMessage::user("previous prompt")];
