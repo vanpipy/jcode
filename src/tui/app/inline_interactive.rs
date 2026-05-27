@@ -89,12 +89,6 @@ fn model_picker_route_is_current(
 
 const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-7", "deepseek/deepseek-v4-pro"];
 
-const CLAUDE_OAUTH_ONLY_MODELS: &[&str] = &["claude-opus-4-7"];
-
-const OPENAI_OAUTH_ONLY_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4[1m]", "gpt-5.4-pro"];
-const COPILOT_OAUTH_MODELS: &[&str] = &["claude-opus-4.7", "gpt-5.5", "gpt-5.4"];
-const OPENROUTER_AUTO_ONLY_MODELS: &[&str] = &["deepseek/deepseek-v4-pro"];
-
 fn model_picker_recommendation_rank(name: &str) -> usize {
     RECOMMENDED_MODELS
         .iter()
@@ -103,22 +97,28 @@ fn model_picker_recommendation_rank(name: &str) -> usize {
 }
 
 fn model_picker_route_can_be_recommended(model: &str, route: &PickerOption) -> bool {
-    if model == "deepseek/deepseek-v4-pro" {
-        return route.api_method == "openrouter" && route.provider == "auto";
+    match model {
+        "gpt-5.5" => {
+            route.api_method == "openai-oauth"
+                && model_picker_provider_labels_match(&route.provider, "openai")
+        }
+        "claude-opus-4-7" => {
+            route.api_method == "claude-oauth"
+                && model_picker_provider_labels_match(&route.provider, "anthropic")
+        }
+        "deepseek/deepseek-v4-pro" => {
+            (route.api_method == "openrouter" && route.provider == "auto")
+                || (route.api_method.starts_with("openai-compatible")
+                    && model_picker_provider_labels_match(&route.provider, "deepseek"))
+        }
+        _ => false,
     }
-    matches!(
-        route.api_method.as_str(),
-        "claude-oauth" | "openai-oauth" | "openai-api-key" | "copilot"
-    ) || (route.api_method == "openrouter" && route.provider == "auto")
 }
 
 fn model_picker_route_is_recommended(model_name: &str, route: &PickerOption) -> bool {
     RECOMMENDED_MODELS.contains(&model_name)
-        && (!(CLAUDE_OAUTH_ONLY_MODELS.contains(&model_name)
-            || OPENAI_OAUTH_ONLY_MODELS.contains(&model_name)
-            || COPILOT_OAUTH_MODELS.contains(&model_name)
-            || OPENROUTER_AUTO_ONLY_MODELS.contains(&model_name))
-            || (model_picker_route_can_be_recommended(model_name, route) && route.available))
+        && route.available
+        && model_picker_route_can_be_recommended(model_name, route)
 }
 
 fn model_picker_provider_hint_from_model_spec(model_spec: &str) -> Option<(&str, &str)> {
@@ -2918,14 +2918,57 @@ mod tests {
 
     #[test]
     fn model_picker_recommended_route_is_provider_aware() {
-        let openai_route = picker_option_with_method("OpenAI", "openai-oauth");
+        let openai_oauth_route = picker_option_with_method("OpenAI", "openai-oauth");
+        let openai_api_key_route = picker_option_with_method("OpenAI", "openai-api-key");
+        let copilot_route = picker_option_with_method("Copilot", "copilot");
+        let claude_oauth_route = picker_option_with_method("Anthropic", "claude-oauth");
+        let claude_openrouter_route = picker_option_with_method("Anthropic", "openrouter");
         let openrouter_auto_route = picker_option_with_method("auto", "openrouter");
         let openrouter_provider_route = picker_option_with_method("DeepSeek", "openrouter");
+        let deepseek_direct_route =
+            picker_option_with_method("DeepSeek", "openai-compatible:deepseek");
+        let unavailable_openai_oauth_route = PickerOption {
+            available: false,
+            ..openai_oauth_route.clone()
+        };
 
-        assert!(model_picker_route_is_recommended("gpt-5.5", &openai_route));
+        assert!(model_picker_route_is_recommended(
+            "gpt-5.5",
+            &openai_oauth_route
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "gpt-5.5",
+            &openai_api_key_route
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "gpt-5.5",
+            &copilot_route
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "gpt-5.5",
+            &unavailable_openai_oauth_route,
+        ));
+
+        assert!(model_picker_route_is_recommended(
+            "claude-opus-4-7",
+            &claude_oauth_route,
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "claude-opus-4-7",
+            &claude_openrouter_route,
+        ));
+        assert!(!model_picker_route_is_recommended(
+            "claude-opus-4-7",
+            &copilot_route,
+        ));
+
         assert!(model_picker_route_is_recommended(
             "deepseek/deepseek-v4-pro",
             &openrouter_auto_route,
+        ));
+        assert!(model_picker_route_is_recommended(
+            "deepseek/deepseek-v4-pro",
+            &deepseek_direct_route,
         ));
         assert!(!model_picker_route_is_recommended(
             "deepseek/deepseek-v4-pro",
