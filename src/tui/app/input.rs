@@ -1615,11 +1615,20 @@ fn handle_expand_edit_badge_shortcut(app: &mut App, key: char) -> bool {
         return false;
     }
 
+    let has_edit_tool_message = app.display_edit_tool_message_count > 0
+        || app.display_messages.iter().any(|message| {
+            message
+                .tool_data
+                .as_ref()
+                .map(|tool| crate::tui::ui::tools_ui::is_edit_tool_name(&tool.name))
+                .unwrap_or(false)
+        });
+
     // The inline edit badge is rendered from the inline diff mode itself, while
     // opening it from other diff modes requires at least one edit tool message.
     // Keep this predicate in one place so the [Alt] [⇧] [E] badge uses the same
     // shortcut path as visible copy badges without falling through to copy key E.
-    if !app.diff_mode.is_inline() && app.display_edit_tool_message_count == 0 {
+    if !app.diff_mode.is_inline() && !has_edit_tool_message {
         return false;
     }
 
