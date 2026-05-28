@@ -992,6 +992,7 @@ pub struct PickerEntry {
     pub is_default: bool,
     pub recommended: bool,
     pub recommendation_rank: usize,
+    pub usage_score: u32,
     pub old: bool,
     /// Human-readable created date (e.g. "Jan 2026") for OpenRouter models
     pub created_date: Option<String>,

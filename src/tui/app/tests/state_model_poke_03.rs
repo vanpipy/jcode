@@ -1686,6 +1686,7 @@ fn test_model_picker_filter_text_includes_provider_and_method() {
         is_default: false,
         recommended: false,
         recommendation_rank: usize::MAX,
+            usage_score: 0,
         old: false,
         created_date: None,
         effort: None,
