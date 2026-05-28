@@ -55,7 +55,7 @@ fn model_picker_route_is_current(
         && jcode_provider_core::model_route_provider_labels_match(&route.provider, current_provider)
 }
 
-const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-7", "deepseek/deepseek-v4-pro"];
+const RECOMMENDED_MODELS: &[&str] = &["gpt-5.5", "claude-opus-4-8"];
 
 fn model_picker_recommendation_rank(name: &str) -> usize {
     RECOMMENDED_MODELS
@@ -853,7 +853,7 @@ impl App {
                             action: PickerAction::Model,
                             selected_option: 0,
                             is_current: is_this_current,
-                            recommended: (*effort == "xhigh" || *effort == "high")
+                            recommended: *effort == "high"
                                 && model_picker_route_is_recommended(name, route),
                             recommendation_rank: model_picker_recommendation_rank(name),
                             old: old_threshold_secs > 0

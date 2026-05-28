@@ -1000,11 +1000,12 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
         "gpt-5.4-pro".to_string(),
         "gpt-5.3-codex-spark".to_string(),
         "gpt-5.3-codex".to_string(),
-        "claude-opus-4-7".to_string(),
+        "claude-opus-4-8".to_string(),
     ];
     app.remote_model_options = app
         .remote_available_entries
         .iter()
+        .filter(|model| model.as_str() != "claude-opus-4-8")
         .cloned()
         .map(|model| crate::provider::ModelRoute {
             model,
@@ -1015,6 +1016,22 @@ fn configure_test_remote_models_with_openai_recommendations(app: &mut App) {
             cheapness: None,
         })
         .collect();
+    app.remote_model_options.push(crate::provider::ModelRoute {
+        model: "claude-opus-4-8".to_string(),
+        provider: "Anthropic".to_string(),
+        api_method: "claude-oauth".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+    });
+    app.remote_model_options.push(crate::provider::ModelRoute {
+        model: "claude-opus-4-8".to_string(),
+        provider: "Anthropic".to_string(),
+        api_method: "claude-api".to_string(),
+        available: true,
+        detail: String::new(),
+        cheapness: None,
+    });
 }
 
 fn configure_test_remote_openrouter_provider_routes(app: &mut App) {
