@@ -380,38 +380,9 @@ pub struct CacheTtlInfo {
     pub cached_tokens: Option<u64>,
 }
 
-/// Get the prompt cache TTL in seconds for a given provider name.
-/// Returns None if the provider doesn't support prompt caching or TTL is unknown.
-pub fn cache_ttl_for_provider(provider: &str) -> Option<u64> {
-    cache_ttl_for_provider_model(provider, None)
-}
-
-pub fn cache_ttl_for_provider_model(provider: &str, model: Option<&str>) -> Option<u64> {
-    match provider.to_lowercase().as_str() {
-        "anthropic" | "claude" => Some(if crate::provider::anthropic::is_cache_ttl_1h() {
-            60 * 60
-        } else {
-            300
-        }),
-        "openai" => {
-            if model
-                .map(crate::provider::openai::OpenAIProvider::supports_extended_prompt_cache_retention)
-                .unwrap_or(false)
-            {
-                Some(24 * 60 * 60)
-            } else {
-                Some(300)
-            }
-        }
-        "openrouter" => Some(300),
-        "jcode subscription" => Some(300),
-        "gemini" => Some(300),
-        "copilot" => None,
-        "cursor" => None,
-        "antigravity" => None,
-        _ => None,
-    }
-}
+/// Prompt cache TTL helpers now live in `crate::provider` (provider
+/// cache-retention policy); re-exported here for existing tui call sites.
+pub use crate::provider::{cache_ttl_for_provider, cache_ttl_for_provider_model};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KvCacheProblemKind {
