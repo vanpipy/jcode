@@ -182,6 +182,8 @@ fn mac_hotkey_launch_agent_plist(
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
     <key>StandardOutPath</key>
     <string>{stdout_path}</string>
     <key>StandardErrorPath</key>

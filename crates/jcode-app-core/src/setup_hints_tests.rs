@@ -84,6 +84,10 @@ fn mac_hotkey_launch_agent_plist_uses_valid_xml_quotes() {
     assert!(!plist.contains("\\\""));
     assert!(plist.contains("<string>setup-hotkey</string>"));
     assert!(plist.contains("<string>--listen-macos-hotkey</string>"));
+    // The listener must load into the GUI (Aqua) session so it has a
+    // window-server connection and can receive Carbon hotkey events.
+    assert!(plist.contains("<key>LimitLoadToSessionType</key>"));
+    assert!(plist.contains("<string>Aqua</string>"));
 }
 
 #[test]
