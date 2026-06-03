@@ -10,7 +10,7 @@
 //! clients receive ready-to-render markdown. The local TUI turn loop has an
 //! equivalent implementation operating directly on its streaming buffer.
 
-use jcode_tui_markdown::REASONING_SENTINEL;
+use jcode_tui_markdown::reasoning_line_markup;
 
 /// Incrementally formats reasoning deltas into dim+italic markdown lines.
 #[derive(Debug, Default)]
@@ -34,13 +34,10 @@ impl ReasoningStreamFormatter {
     }
 
     /// Markup for one complete reasoning line. Empty lines stay bare (no empty
-    /// emphasis run).
+    /// emphasis run). Embedded markdown is escaped so the dim/italic styling
+    /// covers the whole line. Shared with the renderer via `jcode-tui-markdown`.
     fn line_markup(line: &str) -> String {
-        if line.is_empty() {
-            "\n".to_string()
-        } else {
-            format!("*{}{}*\n", REASONING_SENTINEL, line)
-        }
+        reasoning_line_markup(line)
     }
 
     /// Format a reasoning delta, opening the region on first use. Complete lines
@@ -86,6 +83,7 @@ impl ReasoningStreamFormatter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jcode_tui_markdown::REASONING_SENTINEL;
 
     #[test]
     fn wraps_lines_dim_italic_without_header_or_gutter() {
