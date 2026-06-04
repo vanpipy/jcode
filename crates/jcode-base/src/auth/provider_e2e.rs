@@ -22,8 +22,10 @@ use crate::auth::lifecycle::{
     AuthActivationRequest, activate_auth_change, validate_catalog_invariants,
 };
 use crate::auth::live_provider_probes::{
-    fetch_live_openai_compatible_models, run_live_openai_compatible_smoke,
-    run_live_openai_compatible_stream_smoke, run_live_openai_compatible_tool_smoke,
+    fetch_live_openai_compatible_models, run_live_claude_native_smoke,
+    run_live_claude_native_stream_smoke, run_live_claude_native_tool_smoke,
+    run_live_openai_compatible_smoke, run_live_openai_compatible_stream_smoke,
+    run_live_openai_compatible_tool_smoke,
 };
 use crate::live_tests::{
     self, LiveVerificationAuth, LiveVerificationEvent, LiveVerificationResult,
@@ -349,9 +351,7 @@ pub async fn run_provider_e2e(
                     tier,
                     checks,
                     DoctorSpend::default(),
-                    api_key,
-                    resolved.api_key_env.clone(),
-                    resolved.env_file.clone(),
+                    compat_auth(api_key, &resolved.api_key_env, &resolved.env_file),
                 ));
             }
         }
@@ -389,9 +389,7 @@ pub async fn run_provider_e2e(
                     tier,
                     checks,
                     DoctorSpend::default(),
-                    api_key,
-                    resolved.api_key_env.clone(),
-                    resolved.env_file.clone(),
+                    compat_auth(api_key, &resolved.api_key_env, &resolved.env_file),
                 ));
             }
             model.to_string()
@@ -438,10 +436,388 @@ pub async fn run_provider_e2e(
         tier,
         checks,
         spend,
-        api_key,
-        resolved.api_key_env.clone(),
-        resolved.env_file.clone(),
+        compat_auth(api_key, &resolved.api_key_env, &resolved.env_file),
     ))
+}
+
+/// The native-runtime providers this doctor can drive directly (i.e. providers
+/// whose live path is not OpenAI-compatible and so cannot be exercised by
+/// [`run_provider_e2e`]). Today this is the Claude OAuth/subscription provider.
+pub fn native_doctor_supports_provider(provider_id: &str) -> bool {
+    matches!(
+        crate::auth::lifecycle::normalized_auth_provider_id(Some(provider_id)),
+        Some("claude")
+    )
+}
+
+/// The wiring contract for the native Claude (OAuth/subscription) provider.
+///
+/// `claude` activates the native Claude runtime and routes through the
+/// `claude-oauth:` model-switch prefix; its live-catalog routes carry the
+/// `claude-oauth` api_method and the `Anthropic` provider label.
+fn native_claude_wiring_contract() -> WiringContract {
+    WiringContract {
+        api_method: "claude-oauth".to_string(),
+        route_provider: "Anthropic".to_string(),
+        expected_runtime: "claude",
+        expected_namespace: None,
+        switch_prefix: "claude-oauth:".to_string(),
+    }
+}
+
+/// Pick the cheapest sensible Claude model from a catalog for a smoke run.
+///
+/// Prefers Haiku, then Sonnet, then Opus (cheapest to priciest). Variants with
+/// extended context windows (e.g. `[1m]`) are skipped in favor of the base id to
+/// avoid the long-context surcharge. Returns `None` if no Claude tier matches,
+/// letting the caller fall back to the runtime default.
+fn cheapest_catalog_model(catalog_models: &[String]) -> Option<String> {
+    let base_only = |m: &&String| !m.contains('[');
+    for tier in ["haiku", "sonnet", "opus"] {
+        if let Some(model) = catalog_models
+            .iter()
+            .filter(base_only)
+            .find(|m| m.to_ascii_lowercase().contains(tier))
+        {
+            return Some(model.clone());
+        }
+    }
+    None
+}
+
+/// Run the strict provider/model diagnostic for the **native Claude** provider.
+///
+/// This is the native-runtime counterpart to [`run_provider_e2e`]: instead of
+/// driving an OpenAI-compatible HTTP shim, it exercises the production
+/// [`AnthropicProvider`] runtime end to end (OAuth/API-key resolution, the live
+/// `GET /v1/models` catalog, the Claude Code OAuth preflight, request shaping,
+/// SSE→`StreamEvent` translation, and tool-call round-trips). It records the
+/// same 11 strict checkpoints so the coverage ledger can promote `claude` to
+/// READY exactly like a doctor-drivable provider.
+///
+/// `provider_id` is the auth provider id under test (`claude`/`anthropic`).
+pub async fn run_claude_native_e2e(
+    provider_id: &str,
+    requested_model: Option<&str>,
+    tier: DoctorTier,
+) -> anyhow::Result<DoctorReport> {
+    use crate::provider::Provider;
+    use crate::provider::anthropic::AnthropicProvider;
+
+    let normalized = crate::auth::lifecycle::normalized_auth_provider_id(Some(provider_id))
+        .unwrap_or("claude");
+    let provider_label = crate::auth::lifecycle::provider_display_label(Some(normalized))
+        .unwrap_or_else(|| "Anthropic/Claude".to_string());
+    let provider_id = normalized.to_string();
+    let mut checks: Vec<DoctorCheck> = Vec::new();
+
+    // Resolve the credential through the production runtime so the doctor sees
+    // exactly what the agent would. We never log or surface the token itself.
+    //
+    // The `claude` login provider is specifically the OAuth/subscription path,
+    // so pin OAuth mode before resolving: otherwise a self-dev session with
+    // `JCODE_RUNTIME_PROVIDER=claude-api` would silently test the API-key path
+    // and mislabel the credential. Pinning also points any provider instances
+    // the probes build afterwards at the same OAuth path.
+    let provider_runtime = AnthropicProvider::new();
+    let want_oauth = true;
+    if tier.requires_api_key()
+        && let Err(error) = provider_runtime.pin_credential_mode_for_doctor(want_oauth)
+    {
+        checks.push(DoctorCheck::failed(
+            checkpoints::AUTH_CREDENTIAL_LOADED,
+            label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
+            format!(
+                "could not select the Claude OAuth credential path: {error}. \
+                 Run `jcode login --provider claude` to mint a fresh OAuth token."
+            ),
+        ));
+        return Ok(finish_report(
+            provider_id,
+            provider_label,
+            requested_model.unwrap_or("").to_string(),
+            tier,
+            checks,
+            DoctorSpend::default(),
+            native_claude_auth(want_oauth),
+        ));
+    }
+    let credential_is_oauth = if tier.requires_api_key() {
+        match provider_runtime.resolve_access_token_for_doctor().await {
+            Ok((token, is_oauth)) if !token.trim().is_empty() => {
+                let kind = if is_oauth { "OAuth (subscription)" } else { "API key" };
+                checks.push(DoctorCheck::passed(
+                    checkpoints::AUTH_CREDENTIAL_LOADED,
+                    label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
+                    format!("Resolved Claude {kind} credential"),
+                ));
+                Some(is_oauth)
+            }
+            Ok(_) => {
+                checks.push(DoctorCheck::failed(
+                    checkpoints::AUTH_CREDENTIAL_LOADED,
+                    label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
+                    "resolved an empty Claude access token".to_string(),
+                ));
+                return Ok(finish_report(
+                    provider_id,
+                    provider_label,
+                    requested_model.unwrap_or("").to_string(),
+                    tier,
+                    checks,
+                    DoctorSpend::default(),
+                    native_claude_auth(false),
+                ));
+            }
+            Err(error) => {
+                checks.push(DoctorCheck::failed(
+                    checkpoints::AUTH_CREDENTIAL_LOADED,
+                    label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
+                    format!(
+                        "could not resolve a Claude credential: {error}. \
+                         Run `jcode login --provider claude` to mint a fresh OAuth token."
+                    ),
+                ));
+                return Ok(finish_report(
+                    provider_id,
+                    provider_label,
+                    requested_model.unwrap_or("").to_string(),
+                    tier,
+                    checks,
+                    DoctorSpend::default(),
+                    native_claude_auth(false),
+                ));
+            }
+        }
+    } else {
+        checks.push(DoctorCheck::skipped(
+            checkpoints::AUTH_CREDENTIAL_LOADED,
+            label_for(checkpoints::AUTH_CREDENTIAL_LOADED),
+            "offline tier: no credential required".to_string(),
+        ));
+        None
+    };
+    let is_oauth = credential_is_oauth.unwrap_or(false);
+
+    // --- Stage 2: live model catalog (or synthetic for offline) ---
+    let catalog_models: Vec<String> = if tier.requires_api_key() {
+        match provider_runtime.fetch_live_model_ids_for_doctor().await {
+            Ok(models) if !models.is_empty() => {
+                checks.push(DoctorCheck::passed(
+                    checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+                    label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+                    format!("{} live model(s) returned", models.len()),
+                ));
+                models
+            }
+            Ok(_) => {
+                // Endpoint worked but returned nothing usable; fall back to the
+                // known model ids so wiring checks can still run, and record the
+                // catalog endpoint as passed (it answered) but note the fallback.
+                let fallback = crate::provider::known_anthropic_model_ids();
+                checks.push(DoctorCheck::passed(
+                    checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+                    label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+                    format!(
+                        "live catalog empty; using {} known model id(s)",
+                        fallback.len()
+                    ),
+                ));
+                fallback
+            }
+            Err(error) => {
+                checks.push(DoctorCheck::failed(
+                    checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+                    label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+                    error.to_string(),
+                ));
+                return Ok(finish_report(
+                    provider_id,
+                    provider_label,
+                    requested_model.unwrap_or("").to_string(),
+                    tier,
+                    checks,
+                    DoctorSpend::default(),
+                    native_claude_auth(is_oauth),
+                ));
+            }
+        }
+    } else {
+        checks.push(DoctorCheck::skipped(
+            checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+            label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+            "offline tier: using known Claude model ids (no network)".to_string(),
+        ));
+        crate::provider::known_anthropic_model_ids()
+    };
+
+    // Pick the model under test. When the caller does not request a specific
+    // model, prefer the cheapest available Claude tier (Haiku) so the live smoke
+    // run spends as little balance as possible; fall back to the runtime default
+    // and finally to whatever the catalog offers.
+    let default_model = provider_runtime.model();
+    let selected = match requested_model.map(str::trim).filter(|m| !m.is_empty()) {
+        Some(model) => {
+            if tier.requires_api_key() && !catalog_models.iter().any(|m| m == model) {
+                checks.push(DoctorCheck::failed(
+                    checkpoints::MODEL_CATALOG_LIVE_ENDPOINT,
+                    label_for(checkpoints::MODEL_CATALOG_LIVE_ENDPOINT),
+                    format!(
+                        "requested model `{model}` is not in the live catalog ({} model(s): {})",
+                        catalog_models.len(),
+                        truncate_list(&catalog_models)
+                    ),
+                ));
+                return Ok(finish_report(
+                    provider_id,
+                    provider_label,
+                    model.to_string(),
+                    tier,
+                    checks,
+                    DoctorSpend::default(),
+                    native_claude_auth(is_oauth),
+                ));
+            }
+            model.to_string()
+        }
+        None => cheapest_catalog_model(&catalog_models)
+            .or_else(|| {
+                catalog_models
+                    .iter()
+                    .find(|m| **m == default_model)
+                    .cloned()
+            })
+            .or_else(|| catalog_models.first().cloned())
+            .unwrap_or(default_model),
+    };
+
+    // --- Stage 3: auth-lifecycle wiring (catalog reload, picker, fallback, switch) ---
+    run_wiring_checks_for_contract(
+        &provider_id,
+        &native_claude_wiring_contract(),
+        &selected,
+        &catalog_models,
+        &mut checks,
+    );
+
+    // --- Stage 4: API-dependent checkpoints (live native runtime) ---
+    let mut spend = DoctorSpend::default();
+    if tier == DoctorTier::Full {
+        run_native_claude_api_checks(&selected, &mut checks, &mut spend).await;
+    } else {
+        for checkpoint in API_DEPENDENT_CHECKPOINTS {
+            checks.push(DoctorCheck::skipped(
+                checkpoint,
+                label_for(checkpoint),
+                format!(
+                    "{} tier: requires --tier full (spends balance)",
+                    tier.as_str()
+                ),
+            ));
+        }
+    }
+
+    Ok(finish_report(
+        provider_id,
+        provider_label,
+        selected,
+        tier,
+        checks,
+        spend,
+        native_claude_auth(is_oauth),
+    ))
+}
+
+/// Credential descriptor for the native Claude doctor. We never persist the
+/// token; this records the credential *source* (OAuth vs API key) for the
+/// ledger without a secret fingerprint, since OAuth tokens rotate.
+fn native_claude_auth(is_oauth: bool) -> LiveVerificationAuth {
+    let source = if is_oauth {
+        "Claude OAuth (subscription) via auth.json"
+    } else {
+        "Claude API key (ANTHROPIC_API_KEY)"
+    };
+    let env_key = if is_oauth {
+        None
+    } else {
+        Some("ANTHROPIC_API_KEY")
+    };
+    LiveVerificationAuth::non_secret(source, env_key)
+}
+
+/// Drive the three live native-Claude probes and fold their results into the
+/// six API-dependent checkpoints, mirroring [`run_full_api_checks`].
+async fn run_native_claude_api_checks(
+    selected: &str,
+    checks: &mut Vec<DoctorCheck>,
+    spend: &mut DoctorSpend,
+) {
+    // Non-streaming completion.
+    match run_live_claude_native_smoke(selected).await {
+        Ok(stage) => {
+            spend.accumulate(stage.evidence.get("usage"), stage.evidence.get("cost"));
+            checks.push(DoctorCheck::passed(
+                checkpoints::NON_STREAMING_CHAT_COMPLETION,
+                label_for(checkpoints::NON_STREAMING_CHAT_COMPLETION),
+                "received expected completion".to_string(),
+            ));
+        }
+        Err(error) => checks.push(DoctorCheck::failed(
+            checkpoints::NON_STREAMING_CHAT_COMPLETION,
+            label_for(checkpoints::NON_STREAMING_CHAT_COMPLETION),
+            error.to_string(),
+        )),
+    }
+
+    // Streaming completion.
+    match run_live_claude_native_stream_smoke(selected).await {
+        Ok(stage) => {
+            spend.accumulate(stage.evidence.get("usage"), stage.evidence.get("cost"));
+            checks.push(DoctorCheck::passed(
+                checkpoints::STREAMING_CHAT_COMPLETION,
+                label_for(checkpoints::STREAMING_CHAT_COMPLETION),
+                "received expected streamed completion".to_string(),
+            ));
+        }
+        Err(error) => checks.push(DoctorCheck::failed(
+            checkpoints::STREAMING_CHAT_COMPLETION,
+            label_for(checkpoints::STREAMING_CHAT_COMPLETION),
+            error.to_string(),
+        )),
+    }
+
+    // Tool call + derived execution/result/smoke checkpoints (one round-trip).
+    match run_live_claude_native_tool_smoke(selected).await {
+        Ok(stage) => {
+            spend.accumulate(stage.evidence.get("usage"), stage.evidence.get("cost"));
+            for checkpoint in [
+                checkpoints::TOOL_CALL_PARSE,
+                checkpoints::TOOL_EXECUTION_LOOP,
+                checkpoints::TOOL_RESULT_FOLLOWUP,
+                checkpoints::REAL_JCODE_TOOL_SMOKE,
+            ] {
+                checks.push(DoctorCheck::passed(
+                    checkpoint,
+                    label_for(checkpoint),
+                    "tool call parsed and executed".to_string(),
+                ));
+            }
+        }
+        Err(error) => {
+            for checkpoint in [
+                checkpoints::TOOL_CALL_PARSE,
+                checkpoints::TOOL_EXECUTION_LOOP,
+                checkpoints::TOOL_RESULT_FOLLOWUP,
+                checkpoints::REAL_JCODE_TOOL_SMOKE,
+            ] {
+                checks.push(DoctorCheck::failed(
+                    checkpoint,
+                    label_for(checkpoint),
+                    error.to_string(),
+                ));
+            }
+        }
+    }
 }
 
 /// The jcode-side wiring a given compat profile is expected to activate.
@@ -498,10 +874,26 @@ fn run_wiring_checks(
     catalog_models: &[String],
     checks: &mut Vec<DoctorCheck>,
 ) {
-    // Build the live-catalog routes the same way the runtime does after auth,
-    // then drive the production auth-activation + catalog-invariant logic. This
-    // exercises jcode's real wiring without the test sandbox.
-    let contract = wiring_contract(profile);
+    run_wiring_checks_for_contract(
+        profile.id,
+        &wiring_contract(profile),
+        selected,
+        catalog_models,
+        checks,
+    );
+}
+
+/// Shared wiring-checkpoint driver used by both the OpenAI-compatible doctor and
+/// the native Claude doctor. Builds the live-catalog routes a provider would
+/// surface after auth, then exercises the production auth-activation +
+/// catalog-invariant + model-switch logic against them.
+fn run_wiring_checks_for_contract(
+    auth_provider_id: &str,
+    contract: &WiringContract,
+    selected: &str,
+    catalog_models: &[String],
+    checks: &mut Vec<DoctorCheck>,
+) {
     let api_method = contract.api_method.clone();
     let catalog_routes: Vec<ModelRoute> = catalog_models
         .iter()
@@ -516,7 +908,7 @@ fn run_wiring_checks(
         .collect();
 
     let auth = AuthChanged {
-        provider: crate::protocol::AuthProviderId::new(profile.id),
+        provider: crate::protocol::AuthProviderId::new(auth_provider_id),
         credential_source: None,
         auth_method: None,
         expected_runtime: Some(RuntimeProviderKey::new(contract.expected_runtime)),
@@ -533,7 +925,7 @@ fn run_wiring_checks(
         .filter(|route| {
             route.available
                 && (route.api_method.eq_ignore_ascii_case(&api_method)
-                    || route.api_method.eq_ignore_ascii_case(profile.id))
+                    || route.api_method.eq_ignore_ascii_case(auth_provider_id))
         })
         .map(|route| route.model.clone())
         .collect();
@@ -734,9 +1126,7 @@ fn finish_report(
     tier: DoctorTier,
     checks: Vec<DoctorCheck>,
     spend: DoctorSpend,
-    api_key: Option<&str>,
-    api_key_env: String,
-    env_file: String,
+    auth: LiveVerificationAuth,
 ) -> DoctorReport {
     // A tier passes when none of its non-skipped checks failed.
     let tier_passed = !checks.iter().any(|check| check.is_failure());
@@ -756,9 +1146,7 @@ fn finish_report(
         tier,
         &checks,
         &spend,
-        api_key,
-        &api_key_env,
-        &env_file,
+        auth,
         strict_passed || tier_passed,
     );
 
@@ -774,6 +1162,19 @@ fn finish_report(
     }
 }
 
+/// Build the [`LiveVerificationAuth`] for an OpenAI-compatible doctor run from a
+/// resolved env-var key (or mark it offline when no key is present).
+fn compat_auth(api_key: Option<&str>, api_key_env: &str, env_file: &str) -> LiveVerificationAuth {
+    match api_key {
+        Some(key) if !key.trim().is_empty() => LiveVerificationAuth::from_secret(
+            format!("{api_key_env} via {env_file}"),
+            Some(api_key_env),
+            key,
+        ),
+        _ => LiveVerificationAuth::non_secret("provider-doctor (offline)", Some(api_key_env)),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_event(
     provider_id: &str,
@@ -782,9 +1183,7 @@ fn record_event(
     tier: DoctorTier,
     checks: &[DoctorCheck],
     spend: &DoctorSpend,
-    api_key: Option<&str>,
-    api_key_env: &str,
-    env_file: &str,
+    auth: LiveVerificationAuth,
     overall_passed: bool,
 ) {
     let mut stages: Vec<LiveVerificationStage> = Vec::new();
@@ -813,15 +1212,6 @@ fn record_event(
         };
         stages.push(stage);
     }
-
-    let auth = match api_key {
-        Some(key) if !key.trim().is_empty() => LiveVerificationAuth::from_secret(
-            format!("{api_key_env} via {env_file}"),
-            Some(api_key_env),
-            key,
-        ),
-        _ => LiveVerificationAuth::non_secret("provider-doctor (offline)", Some(api_key_env)),
-    };
 
     let result = if overall_passed {
         LiveVerificationResult::Passed
