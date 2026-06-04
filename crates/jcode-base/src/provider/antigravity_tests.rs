@@ -297,3 +297,96 @@ async fn complete_uses_native_https_transport_not_cli_subprocess() {
         other => panic!("expected connection type, got {other:?}"),
     }
 }
+
+#[test]
+fn model_is_claude_detects_anthropic_models_only() {
+    assert!(model_is_claude("claude-sonnet-4-6"));
+    assert!(model_is_claude("claude-opus-4-6-thinking"));
+    assert!(model_is_claude("CLAUDE-SONNET"));
+    assert!(!model_is_claude("gemini-3-flash"));
+    assert!(!model_is_claude("gpt-oss-120b-medium"));
+    assert!(!model_is_claude("default"));
+}
+
+#[test]
+fn flatten_schema_combiners_collapses_anyof_to_first_branch() {
+    // Mirrors the real `bg` tool's `status_filter` schema that the Antigravity
+    // Claude backend rejects.
+    let schema = serde_json::json!({
+        "anyOf": [
+            { "type": "string" },
+            { "items": { "type": "string" }, "type": "array" }
+        ],
+        "description": "Status filter string or array."
+    });
+
+    let flattened = flatten_schema_combiners(&schema);
+
+    assert!(flattened.get("anyOf").is_none(), "anyOf must be removed");
+    assert_eq!(flattened["type"], serde_json::json!("string"));
+    // Sibling metadata is preserved onto the chosen branch.
+    assert_eq!(
+        flattened["description"],
+        serde_json::json!("Status filter string or array.")
+    );
+}
+
+#[test]
+fn flatten_schema_combiners_recurses_into_nested_properties() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "status_filter": {
+                "oneOf": [
+                    { "type": "string" },
+                    { "type": "array" }
+                ]
+            },
+            "name": { "type": "string" }
+        }
+    });
+
+    let flattened = flatten_schema_combiners(&schema);
+
+    assert_eq!(
+        flattened["properties"]["status_filter"]["type"],
+        serde_json::json!("string")
+    );
+    assert!(flattened["properties"]["status_filter"].get("oneOf").is_none());
+    // Untouched branches are preserved verbatim.
+    assert_eq!(
+        flattened["properties"]["name"]["type"],
+        serde_json::json!("string")
+    );
+}
+
+#[test]
+fn flatten_schema_combiners_collapses_allof_inside_array_items() {
+    let schema = serde_json::json!({
+        "type": "array",
+        "items": {
+            "allOf": [
+                { "type": "object", "properties": { "tool": { "type": "string" } } }
+            ]
+        }
+    });
+
+    let flattened = flatten_schema_combiners(&schema);
+
+    assert!(flattened["items"].get("allOf").is_none());
+    assert_eq!(flattened["items"]["type"], serde_json::json!("object"));
+}
+
+#[test]
+fn flatten_schema_combiners_leaves_combiner_free_schema_unchanged() {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "task_ids": { "type": "array", "items": { "type": "string" } },
+            "intent": { "type": "string" }
+        },
+        "required": ["intent"]
+    });
+
+    assert_eq!(flatten_schema_combiners(&schema), schema);
+}
