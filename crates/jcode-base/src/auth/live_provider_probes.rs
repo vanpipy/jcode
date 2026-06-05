@@ -1528,10 +1528,11 @@ pub async fn run_live_native_provider_reasoning_smoke(
     label: &str,
 ) -> anyhow::Result<crate::live_tests::LiveVerificationStage> {
     let started = std::time::Instant::now();
-    // A small logic word problem with a single unambiguous numeric answer (2).
-    // The answer token `REASON_TEST_ANSWER=2` lets us assert a coherent result
-    // without depending on the model's prose. The problem requires at least one
-    // step of arithmetic/elimination so a reasoning model actually reasons.
+    // A small logic word problem with a single unambiguous numeric answer (4
+    // cows: chickens c + cows w give c + w = 7 heads and 2c + 4w = 22 legs, so
+    // w = 4). The `REASON_TEST_ANSWER=<n>` sentinel lets us assert a coherent
+    // result without depending on the model's prose, and the problem requires at
+    // least one elimination/arithmetic step so a reasoning model actually reasons.
     let messages = vec![Message {
         role: Role::User,
         content: vec![ContentBlock::Text {
