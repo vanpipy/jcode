@@ -5669,20 +5669,31 @@ fn benchmark_real_transcript_actions(
     ));
 
     // 3. Selection drag across the visible transcript while parked mid-scroll.
+    //    This mirrors the real mouse-handler input path, which calls
+    //    single_session_visible_body (a full transcript wrap, now memoized) and
+    //    hit-tests the cursor on every pointer move, then redraws.
     {
         let mut app = base_app.clone();
         app.body_scroll_lines = (max_scroll / 2) as f32;
-        let viewport = single_session_body_viewport_from_lines(&app, size, 0.0, &body_lines);
-        let visible = single_session_visible_body(&app, size);
-        app.begin_selection(SelectionPoint { line: 0, column: 0 });
+        let initial_visible = single_session_visible_body(&app, size);
+        if let Some(point) = single_session_body_point_at_position(size, 40.0, 80.0, &initial_visible)
+        {
+            app.begin_selection(point);
+        } else {
+            app.begin_selection(SelectionPoint { line: 0, column: 0 });
+        }
         let mut font_system = benchmark_font_system();
         let (mut buffers, mut window_start, mut window_end, mut last_start) =
             action_prime_window(&app, &body_lines, size, &mut font_system);
         let (samples, _) = benchmark_frame_samples(frames, |frame| {
-            let line = frame % viewport.lines.len().max(1);
-            let column = (frame * 7) % 80;
-            app.update_selection(SelectionPoint { line, column });
-            let _ = &visible;
+            // Real input path: resolve the cursor against the visible body
+            // (full-transcript wrap, memoized) and update the selection.
+            let visible = single_session_visible_body(&app, size);
+            let y = 80.0 + (frame % 600) as f32;
+            let x = 40.0 + (frame % 400) as f32;
+            if let Some(point) = single_session_body_point_at_position(size, x, y, &visible) {
+                app.update_selection(point);
+            }
             action_render_window(
                 &app,
                 &body_lines,
@@ -5697,6 +5708,28 @@ fn benchmark_real_transcript_actions(
             )
         });
         phases.push(("selection_drag", samples));
+    }
+
+    // 3b. Pure input-side selection hit-test cost (no redraw). This isolates the
+    //     real per-mouse-move work the desktop selection handler does:
+    //     single_session_visible_body (a full-transcript wrap, now memoized) plus
+    //     cursor hit-testing. The redraw it triggers is separately cached, so this
+    //     phase exposes the wrap/memo cost that the combined selection_drag phase
+    //     hides behind geometry building.
+    {
+        let mut app = base_app.clone();
+        app.body_scroll_lines = (max_scroll / 2) as f32;
+        app.begin_selection(SelectionPoint { line: 0, column: 0 });
+        let (samples, _) = benchmark_frame_samples(frames, |frame| {
+            let visible = single_session_visible_body(&app, size);
+            let y = 80.0 + (frame % 600) as f32;
+            let x = 40.0 + (frame % 400) as f32;
+            if let Some(point) = single_session_body_point_at_position(size, x, y, &visible) {
+                app.update_selection(point);
+            }
+            visible.len()
+        });
+        phases.push(("selection_input_hittest", samples));
     }
 
     // 4. Typing in the composer while parked at the bottom of the transcript.
