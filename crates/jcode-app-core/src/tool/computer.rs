@@ -492,33 +492,47 @@ mod macos {
 
         let display = CGDisplay::main();
         let bounds = display.bounds();
-        let pixel_w = display.pixels_wide();
-        let pixel_h = display.pixels_high();
-        // Retina displays render N physical pixels per point. Clicks/moves use
-        // points, but the screenshot image is in pixels, so the model must
-        // divide image pixel coordinates by this scale to get click coordinates.
-        let scale = if bounds.size.width > 0.0 {
-            pixel_w as f64 / bounds.size.width
+        let point_w = bounds.size.width;
+        let point_h = bounds.size.height;
+        // The captured PNG is in physical pixels. On Retina displays that's a
+        // multiple of the point size used by click/move. `CGDisplay::pixels_wide`
+        // is unreliable for this (it can report points), so read the true pixel
+        // dimensions straight from the PNG IHDR header.
+        let (pixel_w, pixel_h) = png_dimensions(&bytes).unwrap_or((point_w as u32, point_h as u32));
+        let scale = if point_w > 0.0 {
+            pixel_w as f64 / point_w
         } else {
             1.0
         };
         let summary = format!(
-            "Captured main display: {pixel_w}x{pixel_h} pixels = {:.0}x{:.0} points (scale {scale:.2}x). \
-             IMPORTANT: click/move coordinates are in POINTS. To click something you see in this \
-             image at pixel (px, py), use x = px / {scale:.2}, y = py / {scale:.2}.",
-            bounds.size.width, bounds.size.height
+            "Captured main display: {pixel_w}x{pixel_h} pixels = {point_w:.0}x{point_h:.0} points \
+             (scale {scale:.2}x). IMPORTANT: click/move coordinates are in POINTS. To click \
+             something you see in this image at pixel (px, py), use x = px / {scale:.2}, \
+             y = py / {scale:.2}.",
         );
 
         Ok(ToolOutput::new(summary)
             .with_title("screenshot")
             .with_labeled_image("image/png", STANDARD.encode(&bytes), "screen")
             .with_metadata(json!({
-                "width_points": bounds.size.width,
-                "height_points": bounds.size.height,
+                "width_points": point_w,
+                "height_points": point_h,
                 "width_pixels": pixel_w,
                 "height_pixels": pixel_h,
                 "scale": scale,
             })))
+    }
+
+    /// Read width/height from a PNG's IHDR chunk (big-endian u32s at offsets
+    /// 16 and 20). Returns None if the buffer isn't a PNG.
+    fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+        const PNG_SIG: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        if bytes.len() < 24 || bytes[..8] != PNG_SIG {
+            return None;
+        }
+        let w = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+        let h = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+        Some((w, h))
     }
 
     pub fn ui_tree(depth: u32) -> Result<ToolOutput> {
@@ -527,49 +541,50 @@ mod macos {
         // depth to avoid pathological dumps.
         let script = format!(
             r#"
-on dumpEl(el, lvl, maxlvl)
-    set out to ""
-    if lvl > maxlvl then return out
-    try
-        set r to (role of el as text)
-    on error
+using terms from application "System Events"
+    on dumpEl(el, lvl, maxlvl)
+        set out to ""
+        if lvl > maxlvl then return out
         set r to "?"
-    end try
-    set t to ""
-    try
-        set t to (title of el as text)
-    end try
-    if t is "" then
         try
-            set t to (value of el as text)
+            set r to (role of el as text)
         end try
-    end if
-    set d to ""
-    try
-        set d to (description of el as text)
-    end try
-    set pos to ""
-    try
-        set p to position of el
-        set sz to size of el
-        set pos to " @(" & (item 1 of p) & "," & (item 2 of p) & " " & (item 1 of sz) & "x" & (item 2 of sz) & ")"
-    end try
-    set indent to ""
-    repeat lvl times
-        set indent to indent & "  "
-    end repeat
-    set line to indent & r
-    if t is not "" then set line to line & " \"" & t & "\""
-    if d is not "" then set line to line & " [" & d & "]"
-    set line to line & pos & linefeed
-    set out to out & line
-    try
-        repeat with child in (UI elements of el)
-            set out to out & dumpEl(child, lvl + 1, maxlvl)
+        set t to ""
+        try
+            set t to (title of el as text)
+        end try
+        if t is "" then
+            try
+                set t to (value of el as text)
+            end try
+        end if
+        set d to ""
+        try
+            set d to (description of el as text)
+        end try
+        set pos to ""
+        try
+            set p to position of el
+            set sz to size of el
+            set pos to " @(" & (item 1 of p) & "," & (item 2 of p) & " " & (item 1 of sz) & "x" & (item 2 of sz) & ")"
+        end try
+        set indent to ""
+        repeat lvl times
+            set indent to indent & "  "
         end repeat
-    end try
-    return out
-end dumpEl
+        set ln to indent & r
+        if t is not "" then set ln to ln & " \"" & t & "\""
+        if d is not "" then set ln to ln & " [" & d & "]"
+        set ln to ln & pos & linefeed
+        set out to out & ln
+        try
+            repeat with child in (UI elements of el)
+                set out to out & (my dumpEl(child, lvl + 1, maxlvl))
+            end repeat
+        end try
+        return out
+    end dumpEl
+end using terms from
 
 tell application "System Events"
     set frontApp to first application process whose frontmost is true
@@ -577,7 +592,7 @@ tell application "System Events"
     set out to "Frontmost app: " & appName & linefeed
     try
         set win to front window of frontApp
-        set out to out & my dumpEl(win, 0, {depth})
+        set out to out & (my dumpEl(win, 0, {depth}))
     on error errMsg
         set out to out & "(no window / " & errMsg & ")"
     end try
@@ -727,5 +742,107 @@ end tell
             assert_eq!(ansi_keycode("nope"), None);
             assert_eq!(keycode_for("nope"), None);
         }
+
+        #[test]
+        fn parses_png_dimensions() {
+            // Minimal PNG: 8-byte signature, then IHDR length+type, then 13-byte
+            // IHDR payload starting with width/height big-endian u32s.
+            let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+            bytes.extend_from_slice(&[0, 0, 0, 13]); // IHDR length
+            bytes.extend_from_slice(b"IHDR");
+            bytes.extend_from_slice(&2940u32.to_be_bytes());
+            bytes.extend_from_slice(&1912u32.to_be_bytes());
+            bytes.extend_from_slice(&[8, 6, 0, 0, 0]); // rest of IHDR
+            assert_eq!(super::png_dimensions(&bytes), Some((2940, 1912)));
+            assert_eq!(super::png_dimensions(b"not a png"), None);
+        }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod live_tests {
+    //! Live tests that actually synthesize events / capture the screen. They
+    //! need Accessibility + Screen Recording permission and a GUI session, so
+    //! they are `#[ignore]`d by default. Run explicitly with:
+    //!   cargo test -p jcode-app-core tool::computer::live_tests -- --ignored --nocapture
+    use super::*;
+    use jcode_tool_core::{ToolContext, ToolExecutionMode};
+
+    fn ctx() -> ToolContext {
+        ToolContext {
+            session_id: "test".into(),
+            message_id: "test".into(),
+            tool_call_id: "test".into(),
+            working_dir: None,
+            stdin_request_tx: None,
+            graceful_shutdown_signal: None,
+            execution_mode: ToolExecutionMode::Direct,
+        }
+    }
+
+    async fn run_action(v: Value) -> Result<ToolOutput> {
+        ComputerTool::new().execute(v, ctx()).await
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GUI + permissions"]
+    async fn live_check_permissions() {
+        let out = run_action(json!({ "action": "check_permissions" }))
+            .await
+            .unwrap();
+        eprintln!("{}", out.output);
+        assert!(out.metadata.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GUI + permissions"]
+    async fn live_cursor_and_move() {
+        let before = run_action(json!({ "action": "cursor" })).await.unwrap();
+        eprintln!("before: {}", before.output);
+        // Move to a known point then read it back.
+        run_action(json!({ "action": "move", "x": 400, "y": 300 }))
+            .await
+            .unwrap();
+        let after = run_action(json!({ "action": "cursor" })).await.unwrap();
+        eprintln!("after: {}", after.output);
+        let meta = after.metadata.unwrap();
+        let x = meta["x"].as_f64().unwrap();
+        let y = meta["y"].as_f64().unwrap();
+        assert!((x - 400.0).abs() < 5.0, "x was {x}");
+        assert!((y - 300.0).abs() < 5.0, "y was {y}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GUI + permissions"]
+    async fn live_screenshot() {
+        let out = run_action(json!({ "action": "screenshot" })).await.unwrap();
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].media_type, "image/png");
+        assert!(!out.images[0].data.is_empty());
+        eprintln!("{}", out.output);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires GUI + permissions"]
+    async fn live_ui_tree() {
+        let out = run_action(json!({ "action": "ui", "depth": 3 }))
+            .await
+            .unwrap();
+        eprintln!("{}", out.output);
+        assert!(out.output.contains("Frontmost app"));
+    }
+
+    #[tokio::test]
+    async fn rejects_bad_action() {
+        let err = run_action(json!({ "action": "frobnicate" }))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("Unknown computer action"));
+    }
+
+    #[tokio::test]
+    async fn move_requires_coords() {
+        let err = run_action(json!({ "action": "move" })).await.unwrap_err();
+        assert!(err.to_string().contains("requires"));
     }
 }
