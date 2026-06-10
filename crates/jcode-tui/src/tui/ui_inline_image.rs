@@ -323,6 +323,7 @@ pub(crate) fn fit_geometry_anchored(width: u32, height: u32, chat_width: u16) ->
 
 /// Compute how many rows an inline image should occupy at `chat_width`, given a
 /// viewport height to cap against.
+#[cfg(test)]
 fn fit_rows(width: u32, height: u32, chat_width: u16, viewport_height: u16) -> u16 {
     fit_geometry(width, height, chat_width, viewport_height).0
 }
