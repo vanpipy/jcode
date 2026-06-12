@@ -26,10 +26,21 @@ impl From<SessionCounts> for CountsReport {
     }
 }
 
-/// Format the compact title shown in the menu bar, e.g.
-/// "2 streaming 5 sessions".
+/// Format the compact title shown next to the menu bar icon.
+///
+/// Kept deliberately tiny so macOS never hides the item when the menu bar is
+/// crowded (long status items are the first to be dropped):
+/// - no sessions: "" (icon only)
+/// - idle sessions: "3"
+/// - streaming: "2/7" (streaming/total)
 pub(crate) fn format_menubar_title(counts: SessionCounts) -> String {
-    format!("{} streaming {} sessions", counts.streaming, counts.total)
+    if counts.total == 0 {
+        String::new()
+    } else if counts.streaming == 0 {
+        format!("{}", counts.total)
+    } else {
+        format!("{}/{}", counts.streaming, counts.total)
+    }
 }
 
 /// Human-readable one-line summary used for `--once` and the menu header.
@@ -139,8 +150,9 @@ mod macos {
     use objc2::MainThreadOnly;
     use objc2::rc::Retained;
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSMenu, NSMenuItem, NSStatusBar,
-        NSStatusItem, NSVariableStatusItemLength,
+        NSApplication, NSApplicationActivationPolicy, NSCellImagePosition, NSFont,
+        NSFontWeightRegular, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+        NSVariableStatusItemLength,
     };
     use objc2_foundation::{NSString, ns_string};
 
@@ -158,6 +170,30 @@ mod macos {
         let status_bar = NSStatusBar::systemStatusBar();
         let status_item: Retained<NSStatusItem> =
             status_bar.statusItemWithLength(NSVariableStatusItemLength);
+
+        // Style the button like a native menu bar extra: a template SF Symbol
+        // (auto-adapts to light/dark menu bars and tinting) plus a compact
+        // monospaced-digit count. Keeping the item narrow matters: macOS hides
+        // wide status items first whenever the frontmost app's menus need the
+        // space, which is why a verbose title appears and disappears depending
+        // on which app is focused.
+        if let Some(button) = status_item.button(mtm) {
+            let icon = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+                ns_string!("terminal"),
+                Some(ns_string!("jcode sessions")),
+            );
+            if let Some(icon) = icon.as_deref() {
+                icon.setTemplate(true);
+                button.setImage(Some(icon));
+                // Title on the left, icon on the right.
+                button.setImagePosition(NSCellImagePosition::ImageTrailing);
+            }
+            let menu_bar_font_size = NSFont::menuBarFontOfSize(0.0).pointSize();
+            let font = NSFont::monospacedDigitSystemFontOfSize_weight(menu_bar_font_size, unsafe {
+                NSFontWeightRegular
+            });
+            button.setFont(Some(&font));
+        }
 
         // Build the dropdown menu (header summary + quit).
         let menu = NSMenu::new(mtm);
@@ -228,21 +264,30 @@ mod tests {
     use crate::session::SessionCounts;
 
     #[test]
-    fn title_idle_shows_streaming_and_total() {
+    fn title_no_sessions_is_icon_only() {
+        let title = format_menubar_title(SessionCounts {
+            total: 0,
+            streaming: 0,
+        });
+        assert_eq!(title, "");
+    }
+
+    #[test]
+    fn title_idle_shows_total_only() {
         let title = format_menubar_title(SessionCounts {
             total: 5,
             streaming: 0,
         });
-        assert_eq!(title, "0 streaming 5 sessions");
+        assert_eq!(title, "5");
     }
 
     #[test]
-    fn title_streaming_shows_counts() {
+    fn title_streaming_shows_compact_ratio() {
         let title = format_menubar_title(SessionCounts {
-            total: 5,
+            total: 7,
             streaming: 2,
         });
-        assert_eq!(title, "2 streaming 5 sessions");
+        assert_eq!(title, "2/7");
     }
 
     #[test]
