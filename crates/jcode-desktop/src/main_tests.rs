@@ -7668,6 +7668,52 @@ fn single_session_resume_picker_accepts_vim_navigation_keys() {
 }
 
 #[test]
+fn switcher_resume_defers_transcript_hydration_off_key_path() {
+    let mut app = SingleSessionApp::new(None);
+    assert_eq!(
+        app.handle_key(KeyInput::OpenSessionSwitcher),
+        KeyOutcome::LoadSessionSwitcher
+    );
+    app.apply_session_switcher_cards(vec![test_session_card(
+        "session_alpha",
+        "alpha",
+        "active",
+    )]);
+
+    assert_eq!(app.handle_key(KeyInput::SubmitDraft), KeyOutcome::Redraw);
+    assert_eq!(app.live_session_id.as_deref(), Some("session_alpha"));
+    assert_eq!(
+        app.take_pending_transcript_hydration().as_deref(),
+        Some("session_alpha"),
+        "switcher resume should queue hydration for the event loop instead of \
+         blocking the key handler on a disk parse"
+    );
+    assert_eq!(app.take_pending_transcript_hydration(), None);
+
+    // A hydrated transcript for the live session applies...
+    let applied = app.apply_hydrated_transcript(
+        "session_alpha",
+        Ok(Some(vec![session_data::SessionTranscriptMessage {
+            role: "user".to_string(),
+            content: "hydrated prompt".to_string(),
+        }])),
+    );
+    assert!(applied);
+    assert!(app.body_lines().join("\n").contains("hydrated prompt"));
+
+    // ...but a stale result for a different session is dropped.
+    let stale = app.apply_hydrated_transcript(
+        "session_other",
+        Ok(Some(vec![session_data::SessionTranscriptMessage {
+            role: "user".to_string(),
+            content: "stale prompt".to_string(),
+        }])),
+    );
+    assert!(!stale);
+    assert!(!app.body_lines().join("\n").contains("stale prompt"));
+}
+
+#[test]
 fn single_session_resumed_transcript_hydration_replaces_card_preview() {
     let mut app =
         SingleSessionApp::new(Some(test_session_card("session_alpha", "alpha", "closed")));

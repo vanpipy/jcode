@@ -286,6 +286,10 @@ pub(crate) struct SingleSessionApp {
     view: SingleSessionViewState,
     side_panel: DesktopSidePanelState,
     pending_issue_sync_request: bool,
+    /// Session id whose transcript should be hydrated from disk off the UI
+    /// thread. Set when resuming from the session switcher; serviced by the
+    /// event loop so large transcript parses never stall key handling.
+    pending_transcript_hydration: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1835,6 +1839,7 @@ impl SingleSessionApp {
             view: SingleSessionViewState::default(),
             side_panel: DesktopSidePanelState::default(),
             pending_issue_sync_request: false,
+            pending_transcript_hydration: None,
         }
     }
 
@@ -3592,9 +3597,48 @@ impl SingleSessionApp {
         self.show_help = false;
         self.welcome.timeline = false;
         self.session_switcher.close();
-        self.hydrate_resumed_session_from_disk(&session_id);
+        // Card previews (if any) are applied synchronously above via
+        // replace-session state; the full transcript can be large, so defer
+        // the disk parse to the event loop instead of blocking this key.
+        self.pending_transcript_hydration = Some(session_id.clone());
         self.set_status(SingleSessionStatus::Info(format!("resumed {title}")));
         KeyOutcome::Redraw
+    }
+
+    /// Take the session id queued for off-thread transcript hydration.
+    pub(crate) fn take_pending_transcript_hydration(&mut self) -> Option<String> {
+        self.pending_transcript_hydration.take()
+    }
+
+    /// Queue a transcript hydration to be serviced off the UI thread.
+    pub(crate) fn request_transcript_hydration(&mut self, session_id: &str) {
+        self.pending_transcript_hydration = Some(session_id.to_string());
+    }
+
+    /// Apply a transcript loaded off the UI thread, if it still matches the
+    /// live session. Returns true when the transcript was applied.
+    pub(crate) fn apply_hydrated_transcript(
+        &mut self,
+        session_id: &str,
+        result: Result<Option<Vec<SessionTranscriptMessage>>, String>,
+    ) -> bool {
+        if self.live_session_id.as_deref() != Some(session_id) {
+            return false;
+        }
+        match result {
+            Ok(Some(messages)) if !messages.is_empty() => {
+                self.apply_resumed_session_transcript(messages);
+                true
+            }
+            Ok(_) => false,
+            Err(error) => {
+                crate::desktop_log::warn(format_args!(
+                    "jcode-desktop: failed to hydrate resumed transcript for {session_id}: {error}"
+                ));
+                self.error = Some(format!("failed to load transcript: {error}"));
+                false
+            }
+        }
     }
 
     fn handle_stdin_response_key(&mut self, key: KeyInput) -> KeyOutcome {
