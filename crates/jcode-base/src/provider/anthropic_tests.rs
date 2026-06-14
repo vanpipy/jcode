@@ -1309,6 +1309,62 @@ fn credential_mode_runtime_provider_identity_round_trips() {
 }
 
 #[test]
+fn test_anthropic_fable_5_uses_output_effort_without_adaptive_thinking() {
+    // REGRESSION: `claude-fable-5` exposes `output_config` effort levels but the
+    // Messages API rejects an explicit adaptive `thinking` block with a 400
+    // ("adaptive thinking is not supported on this model"). The request builder
+    // must therefore set `output_config` for the effort but leave `thinking`
+    // unset, even when the display toggle is on.
+    let provider = AnthropicProvider::new();
+    *provider.reasoning_effort.write().unwrap() = Some("high".to_string());
+
+    // With an explicit effort: output_config set, thinking omitted.
+    let (thinking, output_config, temperature) =
+        provider.build_reasoning_request_parts_inner("claude-fable-5", true, false);
+    assert!(
+        thinking.is_none(),
+        "Fable 5 must not send an adaptive thinking block (API rejects it with 400)"
+    );
+    assert_eq!(
+        output_config
+            .expect("Fable 5 should still drive reasoning via output_config")
+            .effort,
+        "high",
+    );
+    // No active thinking block, so the OAuth temperature is restored.
+    assert_eq!(temperature, Some(1.0));
+
+    // Even with show_thinking on, no thinking block is requested.
+    let (thinking, _output_config, _temp) =
+        provider.build_reasoning_request_parts_inner("claude-fable-5", true, true);
+    assert!(
+        thinking.is_none(),
+        "show_thinking must not force an unsupported adaptive thinking block on Fable 5"
+    );
+}
+
+#[test]
+fn detects_anthropic_thinking_unsupported_errors() {
+    // The real 400 body returned when an explicit adaptive thinking block is
+    // sent to a model that does not accept one (e.g. Fable 5).
+    let real = "anthropic api error (400 bad request): {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"adaptive thinking is not supported on this model\"}}";
+    assert!(is_thinking_unsupported_error(real));
+
+    // Unrelated 400s must not trigger the thinking self-heal path.
+    assert!(!is_thinking_unsupported_error(
+        "anthropic api error (400 bad request): {\"type\":\"invalid_request_error\",\"message\":\"max_tokens too large\"}"
+    ));
+    // A thinking-mentioning error that is not a 400 must not match either.
+    assert!(!is_thinking_unsupported_error(
+        "anthropic api error (429 too many requests): rate_limit on thinking budget"
+    ));
+    // Model-not-found is a different recovery path.
+    assert!(!is_thinking_unsupported_error(
+        "anthropic api error (404 not found): {\"type\":\"not_found_error\",\"message\":\"model not found\"}"
+    ));
+}
+
+#[test]
 fn detects_anthropic_model_not_found_errors() {
     // The real 404 body returned when a model id was retired (e.g. Fable 5).
     let real = "anthropic api error (404 not found): {\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"claude fable 5 is not available. please use opus 4.8.\"}}";
