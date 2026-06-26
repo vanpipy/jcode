@@ -1,20 +1,29 @@
 use super::*;
 use std::sync::{Mutex, OnceLock};
 
-fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
-    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TEST_ENV_LOCK
+// All of these tests mutate process-global state: the env-var opt-out tests
+// flip `JCODE_NO_TELEMETRY` / `DO_NOT_TRACK`, while the session tests drive the
+// global `SESSION_STATE`. They must be serialized against *each other* with a
+// single shared lock. Using two separate locks previously let an env test
+// disable telemetry (`is_enabled() == false`) while a session test was calling
+// `begin_session_with_mode`, which then returned early and left `SESSION_STATE`
+// as `None`; the session test's `expect(...)` panicked while holding the
+// `SESSION_STATE` lock and poisoned it, cascading into `PoisonError` failures
+// in every other session test.
+fn global_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    TEST_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn lock_test_env() -> std::sync::MutexGuard<'static, ()> {
+    global_test_lock()
+}
+
 fn lock_telemetry_test_state() -> std::sync::MutexGuard<'static, ()> {
-    static TELEMETRY_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TELEMETRY_TEST_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    global_test_lock()
 }
 
 #[test]
