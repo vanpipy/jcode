@@ -488,11 +488,23 @@ mod tests {
             Multiplexer::Zellij
         );
         assert_eq!(
-            detect_multiplexer(Some("tmux-256color"), Some("/tmp/tmux-1000/default,1,0"), None, None, None),
+            detect_multiplexer(
+                Some("tmux-256color"),
+                Some("/tmp/tmux-1000/default,1,0"),
+                None,
+                None,
+                None
+            ),
             Multiplexer::Tmux
         );
         assert_eq!(
-            detect_multiplexer(Some("screen.xterm-256color"), None, Some("1234.pts-0.host"), None, None),
+            detect_multiplexer(
+                Some("screen.xterm-256color"),
+                None,
+                Some("1234.pts-0.host"),
+                None,
+                None
+            ),
             Multiplexer::Screen
         );
         // TERM prefix alone is enough for screen/tmux even without TMUX/STY.
@@ -514,7 +526,13 @@ mod tests {
     fn detect_multiplexer_herdr_wins_over_others() {
         // Herdr is the most specific signal even if a stale TMUX leaks through.
         assert_eq!(
-            detect_multiplexer(Some("xterm-256color"), Some("/tmp/tmux"), None, None, Some("1")),
+            detect_multiplexer(
+                Some("xterm-256color"),
+                Some("/tmp/tmux"),
+                None,
+                None,
+                Some("1")
+            ),
             Multiplexer::Herdr
         );
     }
@@ -555,10 +573,7 @@ mod tests {
     #[test]
     fn probe_env_helper_back_compat() {
         // Unset / disabled keeps the historical fast default.
-        assert_eq!(
-            picker_init_mode_from_probe_env(None),
-            PickerInitMode::Fast
-        );
+        assert_eq!(picker_init_mode_from_probe_env(None), PickerInitMode::Fast);
         assert_eq!(
             picker_init_mode_from_probe_env(Some("0")),
             PickerInitMode::Fast

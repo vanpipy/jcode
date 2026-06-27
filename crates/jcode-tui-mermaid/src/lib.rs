@@ -243,12 +243,12 @@ pub use inline_image::{
     inline_image_dims, inline_image_id, inline_image_is_materialized, materialize_inline_image,
     materialize_inline_image_by_id,
 };
+pub use runtime::force_test_kitty_picker;
 pub use runtime::{
     error_lines_for, get_cached_png, get_font_size, image_protocol_available, init_picker,
     is_video_export_mode, protocol_type, register_external_image, register_inline_image,
     set_video_export_mode,
 };
-pub use runtime::force_test_kitty_picker;
 pub use viewport_render::{
     InlineFitReadiness, inline_fit_readiness, invalidate_render_state, prewarm_inline_fit_state,
     render_image_widget_fit_stable, render_image_widget_viewport,
