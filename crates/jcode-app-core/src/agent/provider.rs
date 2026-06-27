@@ -73,13 +73,19 @@ impl Agent {
         selection: &crate::provider::RouteSelection,
     ) -> Result<()> {
         self.provider.set_route_selection(selection)?;
+        // `provider.model()` already returns the bare model id (the openrouter
+        // slot's `strip_session_profile_prefix` handled the routing prefix).
+        // `session_safe_model_id` is belt-and-suspenders for cases where the
+        // picker-derived spec still has a user-defined profile prefix (e.g. a
+        // session restored from disk before the fix landed).
         let resolved_model = self.provider.model();
+        let safe_model = crate::provider::session_safe_model_id(&resolved_model);
         self.session.provider_key = Some(selection.runtime_key.stable_id());
         self.session.route_api_method = Some(selection.api_method.clone());
-        self.session.model = Some(resolved_model.clone());
+        self.session.model = Some(safe_model.clone());
         let event = crate::provider::ProviderStateEvent::selected_model(
             crate::provider::ProviderModelSelectionSource::User,
-            resolved_model,
+            safe_model,
         );
         self.provider_runtime_state.apply(event);
         self.persist_session_best_effort("route selection");

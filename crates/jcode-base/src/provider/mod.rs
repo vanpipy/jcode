@@ -264,6 +264,35 @@ pub fn set_model_with_auth_refresh(provider: &dyn Provider, model: &str) -> Resu
     }
 }
 
+/// Strip a known user-defined profile prefix (`<prefix>:<model>`) so the
+/// returned value is safe to persist as `session.model`. Built-in prefixes
+/// (`claude:`, `openai:`, `openrouter:`, `copilot:`, ...) are preserved
+/// because they encode routing decisions that should round-trip through
+/// session restore (`model_switch_request_for_session_*` re-adds them).
+///
+/// `provider.model()` already returns the bare id (the openrouter slot's
+/// `strip_session_profile_prefix` handles it), but some session-save sites
+/// read the picker-supplied spec directly instead of going through the
+/// provider. Returning the bare id from this helper gives those sites a
+/// safe value to write without leaking the prefix into on-disk session
+/// files.
+pub fn session_safe_model_id(model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Some((prefix, rest)) = trimmed.split_once(':') {
+        if explicit_model_provider_prefix(trimmed).is_none()
+            && !prefix.trim().is_empty()
+            && !rest.trim().is_empty()
+            && crate::config::config().providers.contains_key(prefix.trim())
+        {
+            return rest.trim().to_string();
+        }
+    }
+    trimmed.to_string()
+}
+
 use self::dispatch::CompletionMode;
 pub use self::models::{
     AccountModelAvailability, AccountModelAvailabilityState, AnthropicModelCatalog,
@@ -1399,6 +1428,49 @@ impl Provider for MultiProvider {
         let requested_model = model.trim();
         if requested_model.is_empty() {
             anyhow::bail!("Model cannot be empty");
+        }
+
+        // Handle user-defined named profiles from `[providers.X]` in config.toml
+        // BEFORE the OpenRouter branch. The static `openai_compatible_profile_by_id`
+        // only knows about built-in profiles, so a user-defined profile prefix
+        // (e.g. `minimax-cn:MiniMax-M3`) would otherwise fall through to the
+        // OpenRouter branch where `clear_active_openai_compatible_profile()`
+        // destroys the active compatible profile marker. If the slot's runtime
+        // is then rebound to a real-OpenRouter runtime (e.g. via
+        // `new_openrouter_api_key_runtime()`), its `profile_id` becomes `None`
+        // and `strip_session_profile_prefix` no longer strips the prefix,
+        // leaving the slot's model as `minimax-cn:MiniMax-M3` — which the
+        // upstream API rejects with 400 unknown_model.
+        //
+        // Detect the user-defined profile prefix here and route the bare model
+        // id to the existing openrouter slot, which already has
+        // `profile_id = Some(prefix)` (created at startup via
+        // `new_named_openai_compatible`). Apply the profile env vars first
+        // so the slot has the right base URL / api key / cache namespace even
+        // if this is the first call after a fresh process.
+        if let Some((prefix, rest)) = requested_model.split_once(':') {
+            if explicit_model_provider_prefix(requested_model).is_none()
+                && !prefix.trim().is_empty()
+                && !rest.trim().is_empty()
+                && crate::config::config().providers.contains_key(prefix.trim())
+            {
+                let prefix = prefix.trim();
+                let rest = rest.trim();
+                if let Err(err) =
+                    crate::provider_catalog::apply_named_provider_profile_env(prefix)
+                {
+                    crate::logging::warn(&format!(
+                        "Failed to apply named provider profile env for '{}' during set_model: {}",
+                        prefix, err
+                    ));
+                }
+                return self.set_model_on_provider_with_credential_modes(
+                    ActiveProvider::OpenRouter,
+                    rest,
+                    None,
+                    None,
+                );
+            }
         }
 
         if let Some((profile, target_model)) = Self::openai_compatible_model_prefix(requested_model)

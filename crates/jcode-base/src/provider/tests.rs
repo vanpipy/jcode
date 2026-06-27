@@ -681,3 +681,424 @@ include!("tests/auth_refresh.rs");
 include!("tests/model_resolution.rs");
 include!("tests/fallback_failover.rs");
 include!("tests/catalog_subscription.rs");
+
+/// Regression test for the user-defined profile session-restore bug (Bug B).
+///
+/// User scenario: `default_provider = "minimax-cn"` with a user-defined
+/// `[providers.minimax-cn]` in `~/.jcode/config.toml`. When jcode starts
+/// and creates a new session, it calls `provider.model()` to capture the
+/// active model into `session.model`. For user-defined profiles, the openrouter
+/// slot's runtime IS the `minimax-cn` profile (created via
+/// `OpenRouterProvider::new_named_openai_compatible` at startup), and its
+/// `model` field holds the bare `MiniMax-M3` from `default_model`. So `set_model`
+/// is called via `set_config_default_model("MiniMax-M3", Some("minimax-cn"))`
+/// and the slot stores `MiniMax-M3`. Good so far.
+///
+/// The bug appears when jcode restores an existing session whose `session.model`
+/// is `minimax-cn:MiniMax-M3` (this is the form `set_route_selection` writes
+/// via `RouteSelection::routed_model_spec()`). At restore, the agent calls
+/// `set_model_with_auth_refresh(provider, "minimax-cn:MiniMax-M3")`. If the
+/// openrouter slot has been REPLACED with a real-OpenRouter runtime at some
+/// point (e.g. via `new_openrouter_api_key_runtime`), `profile_id` becomes
+/// `None` and `strip_session_profile_prefix` no longer strips the prefix,
+/// leaving the slot's model as `minimax-cn:MiniMax-M3` which the API rejects
+/// with 400.
+///
+/// This test exercises the reproduce: build a MultiProvider with the user-defined
+/// `minimax-cn` openrouter slot, then trigger a sequence of operations that
+/// mimics (a) initial config_default_model set, (b) session-save capturing the
+/// bare model, (c) session-restore with the prefixed model spec.
+#[test]
+fn test_user_defined_profile_session_round_trip_strips_prefix() {
+    with_clean_provider_test_env(|| {
+        let _key = crate::env::set_var("MINIMAX_API_KEY", "test-minimax-key");
+        crate::env::remove_var("JCODE_OPENROUTER_API_KEY_NAME");
+        crate::env::remove_var("JCODE_OPENROUTER_API_BASE");
+        crate::env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        crate::env::remove_var("JCODE_OPENROUTER_PROVIDER_FEATURES");
+
+        let profile = crate::config::NamedProviderConfig {
+            provider_type: crate::config::NamedProviderType::OpenAiCompatible,
+            base_url: "https://api.minimaxi.com/v1".to_string(),
+            api: None,
+            auth: crate::config::NamedProviderAuth::Bearer,
+            auth_header: None,
+            api_key_env: Some("MINIMAX_API_KEY".to_string()),
+            api_key: None,
+            env_file: None,
+            default_model: Some("MiniMax-M3".to_string()),
+            requires_api_key: Some(true),
+            provider_routing: false,
+            model_catalog: true,
+            allow_provider_pinning: false,
+            models: vec![],
+            extra_body: None,
+            supports_reasoning_effort: None,
+        };
+        let openrouter = openrouter::OpenRouterProvider::new_named_openai_compatible(
+            "minimax-cn",
+            &profile,
+        )
+        .expect("named provider should initialize");
+
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(Some(Arc::new(openrouter))),
+            openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::OpenRouter),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: Some(ActiveProvider::OpenRouter),
+        };
+
+        // (a) Startup: set_config_default_model("MiniMax-M3", "minimax-cn")
+        provider
+            .set_model("MiniMax-M3")
+            .expect("set_model bare model should succeed");
+        assert_eq!(provider.model(), "MiniMax-M3");
+
+        // (b) Session save: capture current model into session.model.
+        //     For new sessions, the prefix should NOT appear here because
+        //     the openrouter slot already holds the bare id.
+        let saved_session_model = provider.model();
+        assert_eq!(
+            saved_session_model, "MiniMax-M3",
+            "session.model captured at session-create time must be the bare \
+             model id; if it ever gets the `<profile>:` prefix here, the \
+             session file is poisoned on save and restore cannot fix it"
+        );
+
+        // (c) Some downstream code (e.g. picker selection) writes the
+        //     prefixed form into session.model and the next restore tries
+        //     to set it. This is the poisoned-state case.
+        let poisoned_session_model = "minimax-cn:MiniMax-M3";
+        provider
+            .set_model(poisoned_session_model)
+            .expect("set_model with profile prefix should succeed via slot strip");
+
+        assert_eq!(
+            provider.model(),
+            "MiniMax-M3",
+            "After set_model with profile prefix, provider.model() must return \
+             the bare id, not the prefixed one. This is the regression: with a \
+             user-defined profile, the prefix was leaking through to the API \
+             because the openrouter slot lost its profile_id."
+        );
+    });
+}
+
+/// Regression test for `session_safe_model_id` — the sanitizer that protects
+/// session files from being poisoned with `<profile>:<model>` forms. Used by
+/// `agent::provider::Agent::set_route_selection` to scrub the model field
+/// before persisting it to disk.
+#[test]
+fn test_session_safe_model_id_strips_user_defined_profile_prefix() {
+    with_clean_provider_test_env(|| {
+        // Register a user-defined profile by writing config.toml under the
+        // test's JCODE_HOME (which `with_clean_provider_test_env` already set
+        // to a temp dir) and invalidating the config cache so the next
+        // `config()` call reloads from disk.
+        let config_path = crate::config::Config::path().expect("config path resolves");
+        std::fs::create_dir_all(config_path.parent().expect("config dir"))
+            .expect("create config dir");
+        std::fs::write(
+            &config_path,
+            r#"[providers.minimax-cn]
+type = "openai-compatible"
+base_url = "https://api.minimaxi.com/v1"
+api_key_env = "MINIMAX_API_KEY"
+default_model = "MiniMax-M3"
+requires_api_key = true
+"#,
+        )
+        .expect("write test config");
+        crate::config::invalidate_config_cache();
+
+        // Strip the user-defined prefix
+        assert_eq!(
+            crate::provider::session_safe_model_id("minimax-cn:MiniMax-M3"),
+            "MiniMax-M3"
+        );
+        // Built-in prefixes are preserved (they encode routing decisions
+        // that need to round-trip through session restore).
+        assert_eq!(
+            crate::provider::session_safe_model_id("openrouter:anthropic/claude-sonnet-4"),
+            "openrouter:anthropic/claude-sonnet-4"
+        );
+        assert_eq!(
+            crate::provider::session_safe_model_id("claude-oauth:claude-opus-4-8"),
+            "claude-oauth:claude-opus-4-8"
+        );
+        // Bare model id passes through unchanged.
+        assert_eq!(
+            crate::provider::session_safe_model_id("MiniMax-M3"),
+            "MiniMax-M3"
+        );
+        // Unknown prefix is preserved (not a recognized profile).
+        assert_eq!(
+            crate::provider::session_safe_model_id("unknown-prefix:MiniMax-M3"),
+            "unknown-prefix:MiniMax-M3"
+        );
+    });
+}
+
+/// Regression test for `MultiProvider::set_model` accepting a user-defined
+/// profile prefix and routing it to the existing openrouter slot, even when
+/// `cfg.providers` registers the profile under a name that collides with a
+/// non-built-in prefix jcode did not statically recognize.
+#[test]
+fn test_set_model_with_user_defined_profile_prefix_routes_to_openrouter() {
+    with_clean_provider_test_env(|| {
+        let _key = crate::env::set_var("MINIMAX_API_KEY", "test-minimax-key");
+        crate::env::remove_var("JCODE_OPENROUTER_API_KEY_NAME");
+        crate::env::remove_var("JCODE_OPENROUTER_API_BASE");
+        crate::env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        crate::env::remove_var("JCODE_OPENROUTER_PROVIDER_FEATURES");
+
+        // Register the profile in config so MultiProvider::set_model can find it.
+        let config_path = crate::config::Config::path().expect("config path resolves");
+        std::fs::create_dir_all(config_path.parent().expect("config dir"))
+            .expect("create config dir");
+        std::fs::write(
+            &config_path,
+            r#"[providers.minimax-cn]
+type = "openai-compatible"
+base_url = "https://api.minimaxi.com/v1"
+api_key_env = "MINIMAX_API_KEY"
+default_model = "MiniMax-M3"
+requires_api_key = true
+"#,
+        )
+        .expect("write test config");
+        crate::config::invalidate_config_cache();
+
+        let profile = crate::config::NamedProviderConfig {
+            provider_type: crate::config::NamedProviderType::OpenAiCompatible,
+            base_url: "https://api.minimaxi.com/v1".to_string(),
+            api: None,
+            auth: crate::config::NamedProviderAuth::Bearer,
+            auth_header: None,
+            api_key_env: Some("MINIMAX_API_KEY".to_string()),
+            api_key: None,
+            env_file: None,
+            default_model: Some("MiniMax-M3".to_string()),
+            requires_api_key: Some(true),
+            provider_routing: false,
+            model_catalog: true,
+            allow_provider_pinning: false,
+            models: vec![],
+            extra_body: None,
+            supports_reasoning_effort: None,
+        };
+        let openrouter = openrouter::OpenRouterProvider::new_named_openai_compatible(
+            "minimax-cn",
+            &profile,
+        )
+        .expect("named provider should initialize");
+
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(Some(Arc::new(openrouter))),
+            openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::OpenRouter),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: Some(ActiveProvider::OpenRouter),
+        };
+
+        provider
+            .set_model("minimax-cn:MiniMax-M3")
+            .expect("set_model should accept user-defined profile prefix");
+
+        assert_eq!(
+            provider.model(),
+            "MiniMax-M3",
+            "set_model must strip the user-defined profile prefix before \
+             storing in the openrouter slot; the fixed code path routes the \
+             bare model id through set_model_on_provider_with_credential_modes \
+             so the openrouter slot stores the bare id directly"
+        );
+    });
+}
+
+/// Regression test for the user-defined profile session-restore bug.
+///
+/// When a user configures `[providers.minimax-cn]` (or any other custom
+/// OpenAI-compatible profile in `config.toml`) and jcode restores a session
+/// whose `model` field is `"<profile>:<model>"` (e.g. `minimax-cn:MiniMax-M3`),
+/// `MultiProvider::set_model` must strip the profile prefix before storing it
+/// in the openrouter slot. Otherwise the slot's `model` ends up being
+/// `"minimax-cn:MiniMax-M3"` verbatim, which is then sent to the upstream
+/// API as the `model` JSON field and rejected with 400 unknown_model.
+///
+/// Before the fix, this test failed because `set_model("minimax-cn:MiniMax-M3")`
+/// did not strip the prefix when the profile was user-defined (vs. a built-in
+/// profile like `minimax` whose id is in the static `OPENAI_COMPAT_PROFILES`
+/// list, which DID strip correctly via `openai_compatible_model_prefix`).
+#[test]
+fn test_user_defined_profile_session_restore_strips_profile_prefix() {
+    with_clean_provider_test_env(|| {
+        // Set up the user-defined profile env: api key + base URL via env vars
+        // (the same path `apply_named_provider_profile_env_from_config` uses).
+        let _key = crate::env::set_var("MINIMAX_API_KEY", "test-minimax-key");
+        // The `set_config_default_model` path goes through the OpenRouter
+        // branch. When the openrouter slot is initialized for a user-defined
+        // profile, it reads `JCODE_OPENROUTER_*` env vars to redirect the
+        // shared OpenAI-compatible slot. We must not pre-set those here or
+        // the rebind path will succeed via env redirect rather than via the
+        // slot's profile_id, masking the regression.
+        crate::env::remove_var("JCODE_OPENROUTER_API_KEY_NAME");
+        crate::env::remove_var("JCODE_OPENROUTER_API_BASE");
+        crate::env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        crate::env::remove_var("JCODE_OPENROUTER_PROVIDER_FEATURES");
+
+        // Construct the openrouter slot the same way startup does for a
+        // named profile (via `OpenRouterProvider::new_named_openai_compatible`).
+        let profile = crate::config::NamedProviderConfig {
+            provider_type: crate::config::NamedProviderType::OpenAiCompatible,
+            base_url: "https://api.minimaxi.com/v1".to_string(),
+            api: None,
+            auth: crate::config::NamedProviderAuth::Bearer,
+            auth_header: None,
+            api_key_env: Some("MINIMAX_API_KEY".to_string()),
+            api_key: None,
+            env_file: None,
+            default_model: Some("MiniMax-M3".to_string()),
+            requires_api_key: Some(true),
+            provider_routing: false,
+            model_catalog: true,
+            allow_provider_pinning: false,
+            models: vec![],
+            extra_body: None,
+            supports_reasoning_effort: None,
+        };
+        let openrouter = openrouter::OpenRouterProvider::new_named_openai_compatible(
+            "minimax-cn",
+            &profile,
+        )
+        .expect("named provider should initialize");
+
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(Some(Arc::new(openrouter))),
+            openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::OpenRouter),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: Some(ActiveProvider::OpenRouter),
+        };
+
+        // Session restore path: model spec includes the user-defined profile
+        // prefix. `set_model` must strip it so the upstream API only sees
+        // the bare model id.
+        provider
+            .set_model("minimax-cn:MiniMax-M3")
+            .expect("set_model should accept user-defined profile prefix");
+
+        assert_eq!(
+            provider.model(),
+            "MiniMax-M3",
+            "session restore with user-defined profile prefix must be stripped \
+             before storing in the openrouter slot; otherwise the upstream API \
+             receives `model=minimax-cn:MiniMax-M3` and rejects it as unknown"
+        );
+    });
+}
+
+/// Companion to the above test: the OpenRouter slot's `model` must end up
+/// WITHOUT the profile prefix, AND the active compatible profile marker
+/// should reflect the named profile (so downstream `provider.model()` lookups
+/// via `active_openrouter_execution_provider()` resolve to the named-profile
+/// runtime that knows how to strip the prefix).
+#[test]
+fn test_user_defined_profile_session_restore_keeps_active_profile() {
+    with_clean_provider_test_env(|| {
+        let _key = crate::env::set_var("MINIMAX_API_KEY", "test-minimax-key");
+        crate::env::remove_var("JCODE_OPENROUTER_API_KEY_NAME");
+        crate::env::remove_var("JCODE_OPENROUTER_API_BASE");
+        crate::env::remove_var("JCODE_OPENROUTER_CACHE_NAMESPACE");
+        crate::env::remove_var("JCODE_OPENROUTER_PROVIDER_FEATURES");
+
+        let profile = crate::config::NamedProviderConfig {
+            provider_type: crate::config::NamedProviderType::OpenAiCompatible,
+            base_url: "https://api.minimaxi.com/v1".to_string(),
+            api: None,
+            auth: crate::config::NamedProviderAuth::Bearer,
+            auth_header: None,
+            api_key_env: Some("MINIMAX_API_KEY".to_string()),
+            api_key: None,
+            env_file: None,
+            default_model: Some("MiniMax-M3".to_string()),
+            requires_api_key: Some(true),
+            provider_routing: false,
+            model_catalog: true,
+            allow_provider_pinning: false,
+            models: vec![],
+            extra_body: None,
+            supports_reasoning_effort: None,
+        };
+        let openrouter = openrouter::OpenRouterProvider::new_named_openai_compatible(
+            "minimax-cn",
+            &profile,
+        )
+        .expect("named provider should initialize");
+
+        // Pre-install as an active compatible profile (the normal startup
+        // state once `apply_named_provider_profile_env` has wired everything
+        // up).
+        let provider = MultiProvider {
+            claude: RwLock::new(None),
+            anthropic: RwLock::new(None),
+            openai: RwLock::new(None),
+            copilot_api: RwLock::new(None),
+            antigravity: RwLock::new(None),
+            gemini: RwLock::new(None),
+            cursor: RwLock::new(None),
+            bedrock: RwLock::new(None),
+            openrouter: RwLock::new(Some(Arc::new(openrouter))),
+            openai_compatible_profiles: RwLock::new(std::collections::HashMap::new()),
+            active_openai_compatible_profile: RwLock::new(None),
+            active: RwLock::new(ActiveProvider::OpenRouter),
+            use_claude_cli: false,
+            startup_notices: RwLock::new(Vec::new()),
+            forced_provider: None,
+        };
+
+        provider
+            .set_model("minimax-cn:MiniMax-M3")
+            .expect("set_model should accept user-defined profile prefix");
+
+        // The active compatible profile should resolve to the named profile
+        // so that subsequent `provider.model()` lookups go through the
+        // strip-prefix-aware runtime.
+        assert_eq!(
+            provider.model(),
+            "MiniMax-M3",
+            "provider.model() must return the bare model id, not the prefixed one"
+        );
+    });
+}
