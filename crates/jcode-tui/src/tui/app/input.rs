@@ -1957,10 +1957,14 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
                 let r = &token.raw;
                 r.contains('/') || r.starts_with('~') || r.starts_with('.')
             };
-            if app.path_completion.is_some() {
-                app.cycle_path_completion();
-            } else if is_hash_path_mode
-                || !is_slash_command_root && has_path_separator()
+            // Tab on a path-completion candidate. With the live popup,
+            // `has_path_completion` is true the moment the user types a
+            // delimiter-bearing token or a `#`-mode token. `try_path_autocomplete`
+            // handles the "first Tab applies, subsequent Tabs cycle" semantics
+            // (mirroring `/`'s `autocomplete`): if the input already matches
+            // a candidate value we cycle, otherwise we apply row 0.
+            if is_hash_path_mode
+                || !is_slash_command_root && (app.has_path_completion() || has_path_separator())
             {
                 app.try_path_autocomplete();
             } else {

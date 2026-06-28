@@ -1122,7 +1122,7 @@ impl App {
             }
             KeyCode::Enter if modifiers.is_empty() => self.accept_path_completion(),
             KeyCode::Esc if modifiers.is_empty() => {
-                self.reset_path_completion();
+                self.dismiss_path_completion();
                 true
             }
             _ => false,
@@ -1367,51 +1367,208 @@ impl App {
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion_state = None;
         self.command_suggestion_selected = 0;
-        // Any input mutation invalidates cached path-completion candidates.
+        // Any input mutation invalidates the cached path-completion selection.
         self.reset_path_completion();
+        // After clearing, if we're in `#` mode, auto-populate the popup so
+        // it appears live as the user types — the same way `/` shows
+        // command suggestions without any keypress. This is what makes
+        // `#/ho` + arrow-keys feel as discoverable as `/help`.
+        if self.input.starts_with('#') {
+            let _ = self.open_hash_mode_popup();
+        }
     }
 
     // -----------------------------------------------------------------------
-    // Path completion (Tab when the cursor is over a path-like token).
+    // Path completion (live, like `/` for commands).
     //
-    // The completion popup is rendered by `ui_input.rs` from the data exposed
-    // by `path_completion_suggestions` and `path_completion_selected`. Tab
-    // populates the state via `try_path_autocomplete`; Up/Down walk the
-    // selection; Enter applies. Typing invalidates the state.
+    // The popup is rendered by `ui_input.rs` from the data exposed by
+    // `path_completion_suggestions` and `path_completion_selected`. There is
+    // no stored popup state: candidates are recomputed every render from
+    // the current input (matching the design of `command_suggestions()`).
+    //
+    // `path_completion_selected: usize` is the only state — it tracks which
+    // row is highlighted in the popup and persists across keystrokes (so
+    // typing more characters doesn't reset the selection back to 0).
+    //
+    // Tab and Enter use the same `apply_path_completion` helper to insert
+    // the selected candidate in place of the path token.
     // -----------------------------------------------------------------------
 
-    /// Whether the path-completion popup is currently showing.
+    /// Whether the path-completion popup is currently showing. The popup
+    /// is visible when:
+    ///   1. live candidates exist (i.e. the input points to a path), AND
+    ///   2. the user has not explicitly dismissed it via Esc.
+    /// Flag 2 is reset on every input mutation so the popup re-appears
+    /// as soon as the user types more characters.
     pub fn has_path_completion(&self) -> bool {
-        self.path_completion
-            .as_ref()
-            .is_some_and(|s| !s.candidates.is_empty())
+        if self.path_completion_dismissed {
+            return false;
+        }
+        !self.live_path_candidates().is_empty()
     }
 
-    /// Reset path-completion state. Call when the user types or otherwise
-    /// changes the input in a way that invalidates the cached candidates.
+    /// Reset path-completion state — the selected-index tracker and the
+    /// user-dismissed flag. We do NOT clear candidates here because they
+    /// are derived from input.
     pub fn reset_path_completion(&mut self) {
-        self.path_completion = None;
+        self.path_completion_selected = 0;
+        self.path_completion_dismissed = false;
+    }
+
+    /// Mark the path-completion popup as dismissed by the user (e.g. on
+    /// Esc). The popup stays hidden until the user mutates the input
+    /// (which clears the flag in `reset_path_completion`).
+    fn dismiss_path_completion(&mut self) {
+        self.path_completion_dismissed = true;
     }
 
     /// Current path candidates, formatted for the suggestion popup. Returns
     /// an empty vec when the popup is hidden.
     pub fn path_completion_suggestions(&self) -> Vec<(String, &'static str)> {
-        let Some(state) = self.path_completion.as_ref() else {
-            return Vec::new();
-        };
-        state
-            .candidates
-            .iter()
-            .map(|c| (c.label.clone(), c.description))
+        self.live_path_candidates()
+            .into_iter()
+            .map(|c| (c.label, c.description))
             .collect()
     }
 
     /// Index of the currently highlighted row in the path-completion popup.
     pub fn path_completion_selected(&self) -> usize {
-        self.path_completion
-            .as_ref()
-            .map(|s| s.selected)
-            .unwrap_or(0)
+        let candidates = self.live_path_candidates();
+        if candidates.is_empty() {
+            0
+        } else {
+            self.path_completion_selected.min(candidates.len() - 1)
+        }
+    }
+
+    /// Internal: compute the live candidate list for the current input.
+    /// Used by both the render path (`path_completion_suggestions`) and
+    /// the apply path (`apply_path_completion`).
+    ///
+    /// Two entry points are recognized:
+    ///
+    /// 1. `#` mode — the user typed `#` to enter path mode explicitly.
+    ///    Any token after the `#` produces live candidates.
+    /// 2. Delimiter-bearing token — the user is typing a path with a
+    ///    recognized prefix (`./`, `../`, `~/`, or `/`). The token must
+    ///    contain a path separator or start with a recognized marker;
+    ///    bare words without separators (e.g. `Pro`) do NOT trigger the
+    ///    popup. Use `#Pro` for that.
+    fn live_path_candidates(&self) -> Vec<path_completion::PathCandidate> {
+        let base = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+
+        let result = if let Some(after_hash) = self.input.strip_prefix('#') {
+            // Hash mode: token is everything after the `#` (with leading
+            // whitespace tolerated), up to the cursor.
+            let leading_ws = after_hash.len() - after_hash.trim_start().len();
+            let token_start = 1 + leading_ws;
+            let token_end = self.cursor_pos.min(self.input.len());
+            if token_end <= token_start {
+                Vec::new()
+            } else {
+                let parser_slice = self.input[token_start..token_end].trim_end();
+                match path_completion::PathToken::parse(parser_slice) {
+                    Some(parsed) => path_completion::list_candidates(&parsed, &base),
+                    None => Vec::new(),
+                }
+            }
+        } else {
+            // Delimiter-bearing token fallback. Only treat the token as a
+            // path when it carries an unambiguous path marker — otherwise
+            // we'd pop up suggestions for arbitrary prose tokens like
+            // `test` or `Pro`, which is what the user explicitly rejected.
+            match path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base) {
+                Some((_, token, candidates)) => {
+                    if token_has_path_marker(&token.raw) {
+                        candidates
+                    } else {
+                        Vec::new()
+                    }
+                }
+                None => Vec::new(),
+            }
+        };
+        result
+    }
+
+    /// Internal: open the `#`-mode popup without auto-applying. Used by
+    /// `reset_tab_completion` so the popup shows up live as soon as the
+    /// user types a `#`. (Currently this is just a derived-state reset
+    /// because everything is computed live, but it gives us a single
+    /// hook point if we later want to track when the popup first opens.)
+    fn open_hash_mode_popup(&mut self) -> bool {
+        self.path_completion_selected = 0;
+        self.has_path_completion()
+    }
+
+    /// Apply the currently-selected candidate (or the first one if the
+    /// popup wasn't open). Returns `true` if the input changed.
+    fn apply_path_completion(&mut self) -> bool {
+        let base = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+
+        // Resolve token range, respecting `#` mode vs. delimiter fallback.
+        let (start, candidates) = if let Some(after_hash) = self.input.strip_prefix('#') {
+            let leading_ws = after_hash.len() - after_hash.trim_start().len();
+            let token_start = 1 + leading_ws;
+            let token_end = self.cursor_pos.min(self.input.len());
+            if token_end <= token_start {
+                self.reset_path_completion();
+                return false;
+            }
+            let parser_slice = self.input[token_start..token_end].trim_end();
+            let Some(parsed) = path_completion::PathToken::parse(parser_slice) else {
+                self.reset_path_completion();
+                return false;
+            };
+            let cands = path_completion::list_candidates(&parsed, &base);
+            if cands.is_empty() {
+                self.reset_path_completion();
+                return false;
+            }
+            (token_start, cands)
+        } else {
+            let Some((start, _, cands)) =
+                path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
+            else {
+                self.reset_path_completion();
+                return false;
+            };
+            if cands.is_empty() {
+                self.reset_path_completion();
+                return false;
+            }
+            (start, cands)
+        };
+
+        let selected = self
+            .path_completion_selected
+            .min(candidates.len().saturating_sub(1));
+        let state = path_completion::PathCompletionState::new(
+            start,
+            self.cursor_pos,
+            candidates.clone(),
+            selected,
+        );
+        let (new_input, new_cursor) = state.apply(&self.input);
+        if new_input == self.input {
+            return false;
+        }
+        self.remember_input_undo_state();
+        self.input = new_input;
+        self.cursor_pos = new_cursor;
+        true
     }
 
     /// Tab handler for path-like tokens. Two entry modes are supported:
@@ -1430,9 +1587,47 @@ impl App {
     ///    and we run path completion. Bare words without any separator
     ///    (e.g. `Pro`) no longer trigger — use the `#` prefix for those.
     ///
-    /// Returns `true` when a popup is now active.
+    /// Behavior on repeated Tab mirrors `/`'s `autocomplete`: the FIRST
+    /// Tab applies the currently-selected candidate (default 0, i.e. the
+    /// first match). If the user presses Tab again *and* the current input
+    /// matches one of the candidates, we cycle to the next. Otherwise we
+    /// restart from selection 0.
+    ///
+    /// Returns `true` when a candidate was applied (input changed).
     pub fn try_path_autocomplete(&mut self) -> bool {
-        // Reuse the session's working directory as the base for relative paths.
+        let candidates = self.live_path_candidates();
+        if candidates.is_empty() {
+            self.reset_path_completion();
+            return false;
+        }
+
+        // If the current input's path token already matches one of the
+        // candidate values, treat this as a cycling Tab and advance the
+        // selection. Otherwise (first Tab, or input has drifted away from
+        // the previous apply), apply the currently-selected row.
+        let current_token = self.live_current_path_token();
+        let cycling = current_token
+            .as_ref()
+            .is_some_and(|t| candidates.iter().any(|c| &c.value == t));
+        if cycling {
+            let next = (self.path_completion_selected + 1) % candidates.len();
+            self.path_completion_selected = next;
+        } else {
+            self.path_completion_selected = 0;
+        }
+
+        self.apply_path_completion_with(&candidates)
+    }
+
+    /// Compute the *current* path token under the cursor (the substring of
+    /// `self.input` that would be replaced by an apply). This is what we
+    /// compare against candidate values to decide whether the user is
+    /// cycling through a previously-applied selection or applying for the
+    /// first time.
+    ///
+    /// Returns `None` if there is no path token (so the apply path won't
+    /// run).
+    fn live_current_path_token(&self) -> Option<String> {
         let base = self
             .session
             .working_dir
@@ -1441,23 +1636,48 @@ impl App {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
 
-        // Branch 1: `#`-prefix mode.
-        //
-        // We resolve the token range ourselves (rather than going through
-        // `candidates_at_cursor`) so that the `#` is treated as a literal
-        // marker that the parser never sees and the apply step never
-        // overwrites. The leading whitespace after `#` is tolerated (so
-        // `# Pro` works the same as `#Pro`); trailing whitespace is
-        // *kept* in the input — only the token itself gets replaced.
-        //
-        // Crucially, the token we hand to `PathToken::parse` keeps any
-        // leading `/` it had (so `#/ho` parses as absolute path `/ho`,
-        // matching pi's behavior of treating the parent of `/ho` as the
-        // filesystem root). Without this, `#/ho` would degenerate into
-        // a bare word search of the working dir.
-        let (start, _token, candidates) = if self.input.starts_with('#') {
-            // Token begins right after the `#` (skip leading whitespace).
+        if self.input.starts_with('#') {
+            // Hash mode: the token is the slice after `#` (with leading
+            // whitespace tolerated), up to the cursor.
             let after_hash = &self.input[1..];
+            let leading_ws = after_hash.len() - after_hash.trim_start().len();
+            let token_start = 1 + leading_ws;
+            let token_end = self.cursor_pos.min(self.input.len());
+            if token_end <= token_start {
+                None
+            } else {
+                Some(self.input[token_start..token_end].to_string())
+            }
+        } else {
+            // Delimiter-bearing fallback: extract the token via the
+            // same parser the candidate path uses.
+            let Some((start, _, _)) =
+                path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
+            else {
+                return None;
+            };
+            let end = self.cursor_pos.min(self.input.len());
+            if end <= start {
+                None
+            } else {
+                Some(self.input[start..end].to_string())
+            }
+        }
+    }
+
+    /// Shared apply path: replace the current token with `candidates[selected]`.
+    fn apply_path_completion_with(
+        &mut self,
+        candidates: &[path_completion::PathCandidate],
+    ) -> bool {
+        let base = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let (start, _) = if let Some(after_hash) = self.input.strip_prefix('#') {
             let leading_ws = after_hash.len() - after_hash.trim_start().len();
             let token_start = 1 + leading_ws;
             let token_end = self.cursor_pos.min(self.input.len());
@@ -1465,104 +1685,25 @@ impl App {
                 self.reset_path_completion();
                 return false;
             }
-            // The slice we hand to the parser MUST include any leading
-            // separator that was on the user-typed text after `#`, so that
-            // e.g. `#/ho` parses as the absolute path token `/ho`. We
-            // trim trailing whitespace from the parser slice (the apply
-            // step will preserve any trailing whitespace in the input
-            // since the apply range is `start..cursor`, not
-            // `start..token_end`).
-            let parser_slice = self.input[token_start..token_end].trim_end();
-            let Some(parsed) = path_completion::PathToken::parse(parser_slice) else {
-                self.reset_path_completion();
-                return false;
-            };
-            let candidates = path_completion::list_candidates(&parsed, &base);
-            (token_start, parsed, candidates)
+            (token_start, ())
         } else {
-            // Branch 2: delimiter-bearing token under the cursor.
-            let Some((start, _token, candidates)) =
+            let Some((start, _, _)) =
                 path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
             else {
                 self.reset_path_completion();
                 return false;
             };
-            (start, _token, candidates)
+            (start, ())
         };
-
-        if candidates.is_empty() {
-            self.reset_path_completion();
-            return false;
-        }
-
-        let mut state = path_completion::PathCompletionState::new(
+        let selected = self
+            .path_completion_selected
+            .min(candidates.len().saturating_sub(1));
+        let state = path_completion::PathCompletionState::new(
             start,
             self.cursor_pos,
-            candidates.clone(),
-        );
-        // Apply the first candidate immediately so the user gets instant
-        // feedback; further Tab presses cycle the selection.
-        let (new_input, new_cursor) = state.apply(&self.input);
-        self.remember_input_undo_state();
-        self.input = new_input;
-        self.cursor_pos = new_cursor;
-        // After the apply, the popup's token_end is the new cursor position
-        // (which is also the end of the inserted value). Persist that.
-        state.token_end = new_cursor;
-        self.path_completion = Some(state);
-        true
-    }
-
-    /// Tab handler for the second-and-later Tab: cycle to the next candidate
-    /// in the existing popup without re-running path resolution.
-    pub fn cycle_path_completion(&mut self) -> bool {
-        // Compute the new selection and apply it in a single, non-overlapping
-        // borrow window to satisfy the borrow checker.
-        let (start, end, selected, candidates) = {
-            let Some(state) = self.path_completion.as_ref() else {
-                return false;
-            };
-            if state.candidates.is_empty() {
-                return false;
-            }
-            let len = state.candidates.len();
-            let next = (state.selected + 1) % len;
-            (state.token_start, state.token_end, next, state.candidates.clone())
-        };
-
-        let tmp = path_completion::PathCompletionState {
-            token_start: start,
-            token_end: end,
-            candidates: candidates.clone(),
+            candidates.to_vec(),
             selected,
-        };
-        let (new_input, new_cursor) = tmp.apply(&self.input);
-
-        if let Some(state) = self.path_completion.as_mut() {
-            state.selected = selected;
-            state.token_start = start;
-            state.token_end = new_cursor;
-        }
-        self.remember_input_undo_state();
-        self.input = new_input;
-        self.cursor_pos = new_cursor;
-        true
-    }
-
-    /// Arrow-key handler: move the popup selection by `delta` (with wrap).
-    pub fn move_path_completion_selection(&mut self, delta: i32) -> bool {
-        let Some(state) = self.path_completion.as_mut() else {
-            return false;
-        };
-        state.move_selection(delta)
-    }
-
-    /// Enter handler: apply the currently selected candidate and dismiss the
-    /// popup. Returns `true` if the input changed.
-    pub fn accept_path_completion(&mut self) -> bool {
-        let Some(state) = self.path_completion.take() else {
-            return false;
-        };
+        );
         let (new_input, new_cursor) = state.apply(&self.input);
         if new_input == self.input {
             return false;
@@ -1571,6 +1712,37 @@ impl App {
         self.input = new_input;
         self.cursor_pos = new_cursor;
         true
+    }
+
+    /// Tab handler for the second-and-later Tab: cycle to the next candidate
+    /// in the existing popup without re-running path resolution.
+    pub fn cycle_path_completion(&mut self) -> bool {
+        let len = self.live_path_candidates().len();
+        if len == 0 {
+            return false;
+        }
+        let next = (self.path_completion_selected + 1) % len;
+        self.path_completion_selected = next;
+        self.apply_path_completion()
+    }
+
+    /// Arrow-key handler: move the popup selection by `delta` (with wrap).
+    pub fn move_path_completion_selection(&mut self, delta: i32) -> bool {
+        let len = self.live_path_candidates().len();
+        if len == 0 {
+            return false;
+        }
+        let cur = self.path_completion_selected as i32;
+        self.path_completion_selected = (cur + delta).rem_euclid(len as i32) as usize;
+        true
+    }
+
+    /// Enter handler: apply the currently selected candidate and dismiss the
+    /// popup. Returns `true` if the input changed.
+    pub fn accept_path_completion(&mut self) -> bool {
+        let changed = self.apply_path_completion();
+        self.reset_path_completion();
+        changed
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {
@@ -1654,6 +1826,22 @@ impl App {
                 | "/cache"
         )
     }
+}
+
+/// Whether a parsed path token looks unambiguously like a path. Tokens that
+/// do not carry any path marker (e.g. bare words like `Pro`, `test`) are
+/// not treated as path-completion candidates for the live popup — the
+/// user has to opt in via the explicit `#` prefix.
+///
+/// A token is considered a "path token" if it:
+///   - starts with `./` or `../` (relative to cwd),
+///   - starts with `~` (home-relative), or
+///   - contains a `/` (already-typed separator).
+fn token_has_path_marker(raw: &str) -> bool {
+    if raw.is_empty() {
+        return false;
+    }
+    raw.contains('/') || raw.starts_with('~') || raw.starts_with('.')
 }
 
 #[derive(Clone, Debug)]

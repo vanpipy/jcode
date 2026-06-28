@@ -1228,9 +1228,16 @@ pub struct App {
     command_suggestion_selected: usize,
     // Path-completion popup state. When `Some`, the TUI shows up to
     // `PATH_SUGGESTION_VISIBLE_LIMIT` rows of file/folder candidates and the
-    // selected index drives the row highlight. Activated by Tab when the
-    // token under the cursor looks like a path.
-    path_completion: Option<path_completion::PathCompletionState>,
+    // selected index drives the row highlight. The popup is fully derived
+    // from the current input on every render — this field stores only the
+    // currently highlighted row index so the user's selection persists
+    // across keystrokes.
+    path_completion_selected: usize,
+    // Set to `true` when the user explicitly dismisses the path-completion
+    // popup (Esc). The popup's visibility is the AND of "live candidates
+    // exist" and "not dismissed by the user". Any input mutation clears
+    // this flag so the popup can re-appear when the user keeps typing.
+    path_completion_dismissed: bool,
     // Time when app started (for startup animations)
     app_started: Instant,
     // Whether the client terminal currently has focus. When the terminal window

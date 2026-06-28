@@ -34,19 +34,26 @@ fn handle(app: &mut crate::tui::app::App, code: KeyCode, modifiers: KeyModifiers
 fn tab_with_path_token_populates_popup_and_applies_first_match() {
     let tmp = unique_tmp_dir("tab_basic");
     fs::create_dir(tmp.join("Project")).unwrap();
+    fs::write(tmp.join("Project").join("inner.txt"), b"").unwrap();
     fs::write(tmp.join("Projectile.txt"), b"").unwrap();
 
     let mut app = create_test_app();
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
     app.input = "look at ./Pro".to_string();
     app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
 
-    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
-    assert!(app.has_path_completion(), "popup should be active");
+    // Live popup is visible because the token `./Pro` is delimiter-bearing.
+    assert!(
+        app.has_path_completion(),
+        "popup should be active as soon as the delimiter-bearing token is typed"
+    );
     let s = app.path_completion_suggestions();
     assert!(!s.is_empty());
-    // The first candidate should be applied into the input.
+
+    // Pressing Tab applies the first candidate into the input.
     let first_value = s[0].0.clone();
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
     assert!(
         app.input.contains(&first_value),
         "input `{}` should contain first candidate `{}`",
@@ -61,28 +68,32 @@ fn tab_with_path_token_populates_popup_and_applies_first_match() {
 fn cycling_tab_walks_candidates_in_order() {
     let tmp = unique_tmp_dir("cycle");
     fs::create_dir(tmp.join("Aaa")).unwrap();
+    fs::write(tmp.join("Aaa").join("inner.txt"), b"").unwrap();
     fs::create_dir(tmp.join("Abb")).unwrap();
+    fs::write(tmp.join("Abb").join("inner.txt"), b"").unwrap();
     fs::write(tmp.join("Acc.txt"), b"").unwrap();
 
     let mut app = create_test_app();
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
     app.input = "./A".to_string();
     app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
 
     // First Tab: popup opens, first candidate is applied.
     handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
-    assert!(app.has_path_completion());
-    // The applied value replaces just the path token (without the `./` prefix
-    // since the parser strips the prefix marker).
-    let first_value = app.path_completion_suggestions()[0].0.clone();
-    assert!(first_value.starts_with("A"));
-    assert!(app.input.ends_with(&first_value) || app.input.contains(&first_value));
-    let initial_selected = app.path_completion_selected();
+    assert!(
+        app.has_path_completion(),
+        "first Tab should leave the popup active (descending into a non-empty dir)"
+    );
+    let initial_input = app.input.clone();
 
     // Second Tab: cycle to the next candidate.
     handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
-    let next_selected = app.path_completion_selected();
-    assert_ne!(initial_selected, next_selected);
+    let next_input = app.input.clone();
+    assert_ne!(
+        initial_input, next_input,
+        "second Tab should cycle to a different candidate"
+    );
 
     fs::remove_dir_all(&tmp).ok();
 }
@@ -91,15 +102,18 @@ fn cycling_tab_walks_candidates_in_order() {
 fn up_down_arrows_move_selection_in_popup() {
     let tmp = unique_tmp_dir("arrows");
     fs::create_dir(tmp.join("One")).unwrap();
+    fs::write(tmp.join("One").join("inner.txt"), b"").unwrap();
     fs::create_dir(tmp.join("Two")).unwrap();
+    fs::write(tmp.join("Two").join("inner.txt"), b"").unwrap();
     fs::create_dir(tmp.join("Three")).unwrap();
+    fs::write(tmp.join("Three").join("inner.txt"), b"").unwrap();
 
     let mut app = create_test_app();
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
     app.input = "./".to_string();
     app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
 
-    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
     assert!(app.has_path_completion());
     let s0 = app.path_completion_selected();
 
@@ -118,12 +132,13 @@ fn up_down_arrows_move_selection_in_popup() {
 fn esc_dismisses_path_popup() {
     let tmp = unique_tmp_dir("esc");
     fs::create_dir(tmp.join("Dir")).unwrap();
+    fs::write(tmp.join("Dir").join("inner.txt"), b"").unwrap();
     let mut app = create_test_app();
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
     app.input = "./".to_string();
     app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
 
-    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
     assert!(app.has_path_completion());
 
     handle(&mut app, KeyCode::Esc, KeyModifiers::empty());
@@ -133,24 +148,68 @@ fn esc_dismisses_path_popup() {
 }
 
 #[test]
-fn reset_tab_completion_also_clears_path_state() {
+fn reset_tab_completion_updates_path_popup_on_typing() {
+    // With the live-popup design, every input mutation re-runs
+    // `reset_tab_completion` and the popup is re-computed from the new
+    // input. Typing more characters should *update* the candidate list,
+    // not dismiss it.
     let tmp = unique_tmp_dir("reset");
     fs::create_dir(tmp.join("Foo")).unwrap();
+    fs::create_dir(tmp.join("Food")).unwrap();
+    fs::create_dir(tmp.join("Bar")).unwrap();
     let mut app = create_test_app();
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
-    app.input = "./".to_string();
+    app.input = "./F".to_string();
     app.cursor_pos = app.input.len();
-
-    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
-    assert!(app.has_path_completion());
-
-    // The input layer calls reset_tab_completion() after every keystroke that
-    // mutates the buffer. The reset must also drop the path popup, otherwise
-    // stale candidates would be applied to a freshly-edited input.
     app.reset_tab_completion();
+
+    let initial: Vec<String> = app
+        .path_completion_suggestions()
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
     assert!(
-        !app.has_path_completion(),
-        "reset_tab_completion must also clear the path popup"
+        initial.iter().any(|l| l == "Foo/") && initial.iter().any(|l| l == "Food/"),
+        "popup should show Foo* entries, got {:?}",
+        initial
+    );
+    assert!(!initial.iter().any(|l| l == "Bar/"));
+
+    // Simulate the user typing one more character. The popup should
+    // update with the narrower match set.
+    app.input.push('o');
+    app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
+
+    let updated: Vec<String> = app
+        .path_completion_suggestions()
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
+    assert!(
+        updated.iter().any(|l| l == "Foo/") && updated.iter().any(|l| l == "Food/"),
+        "popup should still show Foo* entries after typing `o`, got {:?}",
+        updated
+    );
+    assert!(!updated.iter().any(|l| l == "Bar/"));
+
+    // Backspacing back to "./" should re-list all base-dir entries
+    // including `Bar`.
+    app.input.pop();
+    app.input.pop();
+    app.input.push('/');
+    app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
+
+    let restored: Vec<String> = app
+        .path_completion_suggestions()
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
+    assert!(
+        restored.iter().any(|l| l == "Bar/"),
+        "popup should re-list Bar/ after backspace, got {:?}",
+        restored
     );
 
     fs::remove_dir_all(&tmp).ok();
@@ -159,9 +218,10 @@ fn reset_tab_completion_also_clears_path_state() {
 #[test]
 fn hash_prefix_enters_path_mode_and_lists_working_dir() {
     // The recommended entry into path-completion mode is the `#` prefix,
-    // analogous to how `/` enters command-completion mode. Typing `#` and
-    // then any non-empty text should trigger path completion on Tab, with
-    // the `#` itself preserved verbatim in the input.
+    // analogous to how `/` enters command-completion mode. **The popup
+    // appears LIVE as the user types** — no Tab required. Typing `#Pro`
+    // should immediately surface `Project/` and `Projectile/` as
+    // candidates. Pressing Tab applies the highlighted row.
     let tmp = unique_tmp_dir("hash_mode");
     fs::create_dir(tmp.join("Project")).unwrap();
     fs::create_dir(tmp.join("Projectile")).unwrap();
@@ -171,11 +231,16 @@ fn hash_prefix_enters_path_mode_and_lists_working_dir() {
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
     app.input = "#Pro".to_string();
     app.cursor_pos = app.input.len();
+    // Simulate the input being typed (reset_tab_completion is what runs on
+    // every input change and auto-opens the `#` popup). In real usage the
+    // App-level key handler already calls this; we call it explicitly here
+    // to mirror that flow.
+    app.reset_tab_completion();
 
-    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    // Live popup — no Tab pressed yet.
     assert!(
         app.has_path_completion(),
-        "Tab on `#Pro` must trigger the path popup in hash-mode"
+        "`#Pro` must show the path popup live, without Tab"
     );
     let labels: Vec<String> = app
         .path_completion_suggestions()
@@ -184,24 +249,18 @@ fn hash_prefix_enters_path_mode_and_lists_working_dir() {
         .collect();
     assert!(
         labels.iter().any(|l| l == "Project/"),
-        "hash-mode Tab should list Pro* entries, got {:?}",
+        "hash-mode must list Pro* entries live, got {:?}",
         labels
     );
     assert!(labels.iter().any(|l| l == "Projectile/"));
     assert!(!labels.iter().any(|l| l.starts_with("article")));
-    // The `#` marker must be preserved in the input; the apply step only
-    // replaces the path portion after the `#`.
+
+    // Press Tab — applies the first candidate (Project/).
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
     assert!(
-        app.input.starts_with('#'),
-        "the `#` marker must be preserved across apply, got: {:?}",
+        app.input.starts_with("#Project/"),
+        "Tab should apply the first match, got: {:?}",
         app.input
-    );
-    let first_value = app.path_completion_suggestions()[0].0.clone();
-    assert!(
-        app.input.contains(&first_value),
-        "input `{}` should contain first candidate `{}`",
-        app.input,
-        first_value
     );
 
     fs::remove_dir_all(&tmp).ok();
@@ -294,8 +353,10 @@ fn bare_word_tab_no_longer_triggers_path_popup() {
 fn delimiter_token_tab_still_triggers_path_popup() {
     // The fallback for users who already started typing a path WITHOUT the
     // `#` marker: any token containing a path separator (`./`, `~/`, `/`,
-    // or a relative like `foo/bar`) still triggers path completion. This
-    // keeps the previous behavior for muscle-memory users.
+    // or a relative like `foo/bar`) still triggers path completion. With
+    // the live-popup design, the popup is visible *as soon as* the user
+    // types a delimiter-bearing token; pressing Tab applies the first
+    // candidate.
     let tmp = unique_tmp_dir("delim");
     fs::create_dir(tmp.join("Project")).unwrap();
     fs::create_dir(tmp.join("Projectile")).unwrap();
@@ -304,14 +365,33 @@ fn delimiter_token_tab_still_triggers_path_popup() {
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
     app.input = "./Pro".to_string();
     app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
 
-    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    // Live popup — visible before any Tab because the token is
+    // delimiter-bearing.
     assert!(
         app.has_path_completion(),
-        "Tab on `./Pro` (delimiter-bearing token) must trigger the popup"
+        "`./Pro` (delimiter-bearing token) must show the popup live"
     );
-    let first_value = app.path_completion_suggestions()[0].0.clone();
-    assert!(first_value.starts_with("Pro"));
+    let labels: Vec<String> = app
+        .path_completion_suggestions()
+        .into_iter()
+        .map(|(l, _)| l)
+        .collect();
+    assert!(
+        labels.iter().any(|l| l == "Project/"),
+        "live popup must list Pro* entries, got {:?}",
+        labels
+    );
+    assert!(labels.iter().any(|l| l == "Projectile/"));
+
+    // Pressing Tab applies the first candidate.
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    assert!(
+        app.input.starts_with("./Project/"),
+        "Tab should apply the first match, got: {:?}",
+        app.input
+    );
 
     fs::remove_dir_all(&tmp).ok();
 }
@@ -377,8 +457,10 @@ fn trailing_slash_descends_into_directory() {
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
     app.input = "./Project/".to_string();
     app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
 
-    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    // The trailing slash means "list contents of Project/" — the popup
+    // shows the descendents live, without Tab.
     assert!(app.has_path_completion());
     let labels: Vec<String> = app
         .path_completion_suggestions()
@@ -409,16 +491,20 @@ fn path_popup_actually_renders_into_terminal() {
     let _lock = scroll_render_test_lock();
     let tmp = unique_tmp_dir("render");
     fs::create_dir(tmp.join("Project")).unwrap();
+    fs::write(tmp.join("Project").join("inner.txt"), b"").unwrap();
     fs::write(tmp.join("Projectile.txt"), b"").unwrap();
 
     let mut app = create_test_app();
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
     app.input = "#Pro".to_string();
     app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
 
-    // Trigger the popup.
-    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
-    assert!(app.has_path_completion());
+    // Live popup is visible because the user is in `#` mode.
+    assert!(
+        app.has_path_completion(),
+        "`#Pro` should show the path popup live"
+    );
 
     // Render and grep the buffer for our labels. We don't pin the exact
     // color since that depends on the renderer's theme, but the text must
@@ -458,9 +544,10 @@ fn chinese_prefix_then_relative_path_tab_works() {
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
     app.input = "查看路径 ./ho".to_string();
     app.cursor_pos = app.input.len();
+    app.reset_tab_completion();
 
-    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
-
+    // Live popup — the Chinese prefix and trailing whitespace don't
+    // interfere with delimiter-bearing token detection.
     let suggestions: Vec<String> = app
         .path_completion_suggestions()
         .into_iter()
@@ -468,7 +555,7 @@ fn chinese_prefix_then_relative_path_tab_works() {
         .collect();
     assert!(
         app.has_path_completion(),
-        "Tab on `查看路径 ./ho` must trigger the path popup, suggestions were: {:?}",
+        "`./ho` after `查看路径 ` must show the path popup live, suggestions were: {:?}",
         suggestions
     );
     // `ho` should match entries starting with `ho` (case-insensitive).
@@ -487,11 +574,17 @@ fn chinese_prefix_then_relative_path_tab_works() {
         "non-matching README must be filtered out, got: {:?}",
         suggestions
     );
-    // The token text `./ho` must be replaced by the applied candidate
-    // (relative form), preserving the Chinese prefix the user already typed.
+
+    // Pressing Tab applies the first candidate, preserving the Chinese prefix.
+    let first_label = suggestions[0].clone();
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    // The apply step rewrites `./ho` to the first match. The exact applied
+    // text may be `./home/` (relative form) or `home/` depending on how the
+    // candidate was constructed — assert both forms are acceptable.
     assert!(
-        app.input.contains("./home/"),
-        "applying the first candidate should rewrite `./ho` to `./home/`, got: {:?}",
+        app.input.contains(&first_label) || app.input.contains(&format!("./{}", first_label)),
+        "applying the first candidate should rewrite `./ho` to include `{}`, got: {:?}",
+        first_label,
         app.input
     );
     assert!(

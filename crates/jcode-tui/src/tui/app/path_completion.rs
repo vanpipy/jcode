@@ -380,12 +380,17 @@ pub struct PathCompletionState {
 }
 
 impl PathCompletionState {
-    pub fn new(token_start: usize, token_end: usize, candidates: Vec<PathCandidate>) -> Self {
+    pub fn new(
+        token_start: usize,
+        token_end: usize,
+        candidates: Vec<PathCandidate>,
+        selected: usize,
+    ) -> Self {
         Self {
             token_start,
             token_end,
             candidates,
-            selected: 0,
+            selected,
         }
     }
 
@@ -439,7 +444,7 @@ mod state_tests {
     #[test]
     fn apply_replaces_only_the_token() {
         // "look at ./Pro and" — "./Pro" lives at byte offsets 8..13.
-        let s = PathCompletionState::new(8, 13, cands());
+        let s = PathCompletionState::new(8, 13, cands(), 0);
         let (out, cursor) = s.apply("look at ./Pro and");
         assert_eq!(out, "look at ./Project/ and");
         assert_eq!(cursor, 8 + "./Project/".len());
@@ -447,7 +452,7 @@ mod state_tests {
 
     #[test]
     fn move_selection_wraps() {
-        let mut s = PathCompletionState::new(0, 0, cands());
+        let mut s = PathCompletionState::new(0, 0, cands(), 0);
         assert_eq!(s.selected, 0);
         assert!(s.move_selection(-1));
         assert_eq!(s.selected, 1);
@@ -457,7 +462,7 @@ mod state_tests {
 
     #[test]
     fn move_selection_empty_does_nothing() {
-        let mut s = PathCompletionState::new(0, 0, vec![]);
+        let mut s = PathCompletionState::new(0, 0, vec![], 0);
         assert!(!s.move_selection(1));
         assert_eq!(s.selected, 0);
     }
