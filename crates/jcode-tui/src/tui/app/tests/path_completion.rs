@@ -266,3 +266,44 @@ fn trailing_slash_descends_into_directory() {
 
     fs::remove_dir_all(&tmp).ok();
 }
+
+#[test]
+fn path_popup_actually_renders_into_terminal() {
+    // Visual regression guard: the popup state must show up in the rendered
+    // frame, not just in the App's internal state. This is the assertion that
+    // would have caught any "state updates but UI doesn't redraw" bug.
+    let _lock = scroll_render_test_lock();
+    let tmp = unique_tmp_dir("render");
+    fs::create_dir(tmp.join("Project")).unwrap();
+    fs::write(tmp.join("Projectile.txt"), b"").unwrap();
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
+    app.input = "Pro".to_string();
+    app.cursor_pos = app.input.len();
+
+    // Trigger the popup.
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    assert!(app.has_path_completion());
+
+    // Render and grep the buffer for our labels. We don't pin the exact
+    // color since that depends on the renderer's theme, but the text must
+    // be visible — otherwise the user sees nothing on Tab.
+    let backend = ratatui::backend::TestBackend::new(120, 20);
+    let mut terminal = ratatui::Terminal::new(backend).expect("test terminal");
+    terminal
+        .draw(|f| crate::tui::ui::draw(f, &app))
+        .expect("draw");
+    let rendered = buffer_to_text(&terminal);
+
+    assert!(
+        rendered.contains("Project/"),
+        "rendered buffer should show Project/ from the path popup, got:\n{rendered}",
+    );
+    assert!(
+        rendered.contains("Projectile.txt"),
+        "rendered buffer should show Projectile.txt from the path popup, got:\n{rendered}",
+    );
+
+    fs::remove_dir_all(&tmp).ok();
+}

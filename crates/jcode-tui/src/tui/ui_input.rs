@@ -2011,6 +2011,11 @@ pub(super) fn draw_input(
         && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
         && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing());
     let has_path_suggestions = !path_suggestions.is_empty();
+    // `has_popup` is true when *any* suggestion popup should be drawn. The
+    // path popup takes precedence over the command popup (the input layer
+    // guarantees they never co-occur), so we OR them together rather than
+    // gating the path popup on `has_suggestions`.
+    let has_popup = has_suggestions || has_path_suggestions;
 
     let (prompt_char, caret_color) = input_prompt(app);
     let num_str = format!("{}", next_prompt);
@@ -2089,7 +2094,7 @@ pub(super) fn draw_input(
         frame.area().height,
     );
 
-    if has_suggestions && !render_suggestions_below {
+    if has_popup && !render_suggestions_below {
         lines.extend(suggestion_lines.iter().cloned());
     }
 
@@ -2115,7 +2120,7 @@ pub(super) fn draw_input(
         }
     }
 
-    if has_suggestions && render_suggestions_below {
+    if has_popup && render_suggestions_below {
         for line in suggestion_lines {
             if lines.len() >= visible_height {
                 break;
