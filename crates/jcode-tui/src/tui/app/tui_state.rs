@@ -641,6 +641,14 @@ impl crate::tui::TuiState for App {
         self.command_suggestion_selected
     }
 
+    fn path_completion_suggestions(&self) -> Vec<(String, &'static str)> {
+        App::path_completion_suggestions(self)
+    }
+
+    fn path_completion_selected(&self) -> usize {
+        App::path_completion_selected(self)
+    }
+
     fn active_skill(&self) -> Option<String> {
         self.active_skill.clone()
     }

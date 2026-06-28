@@ -70,6 +70,78 @@ fn command_suggestion_hint_line_count(suggestions: &[(String, &'static str)]) ->
     }
 }
 
+/// Number of rows occupied by the path-completion popup. Capped at
+/// `PATH_SUGGESTION_VISIBLE_LIMIT` (currently 3).
+fn path_suggestion_hint_line_count(suggestions: &[(String, &'static str)]) -> u16 {
+    if suggestions.is_empty() {
+        0
+    } else {
+        suggestions
+            .len()
+            .min(app::PATH_SUGGESTION_VISIBLE_LIMIT) as u16
+    }
+}
+
+/// Render the path-completion popup rows. Up to
+/// `PATH_SUGGESTION_VISIBLE_LIMIT` rows are shown; if there are more, an
+/// extra "+N more" indicator is appended to the last visible row.
+fn path_suggestion_lines(
+    app: &dyn TuiState,
+    suggestions: &[(String, &'static str)],
+) -> Vec<Line<'static>> {
+    if suggestions.is_empty() {
+        return Vec::new();
+    }
+    let limit = app::PATH_SUGGESTION_VISIBLE_LIMIT;
+    let total = suggestions.len();
+    let selected = app.path_completion_selected().min(total.saturating_sub(1));
+    let start = if total <= limit {
+        0
+    } else {
+        selected.saturating_add(1).saturating_sub(limit).min(total - limit)
+    };
+    let end = (start + limit).min(total);
+    let more_count = total.saturating_sub(end);
+
+    let mut lines = Vec::new();
+    for (i, (label, desc)) in suggestions[start..end].iter().enumerate() {
+        let is_selected = start + i == selected;
+        let label_color = if is_selected {
+            rgb(255, 213, 128)
+        } else if desc == &"directory" {
+            rgb(128, 203, 196)
+        } else {
+            rgb(200, 200, 200)
+        };
+        let desc_color = if is_selected {
+            rgb(255, 213, 128)
+        } else {
+            dim_color()
+        };
+        let mut spans = vec![Span::styled(label.clone(), Style::default().fg(label_color))];
+        if !desc.is_empty() {
+            spans.push(Span::styled(
+                format!("  {}", desc),
+                Style::default().fg(desc_color),
+            ));
+        }
+        if is_selected && more_count > 0 {
+            spans.push(Span::styled(
+                format!("  +{} more", more_count),
+                Style::default().fg(dim_color()),
+            ));
+        }
+        if i == 0 && start > 0 {
+            spans.push(Span::styled(
+                format!("  ↑{}", start),
+                Style::default().fg(dim_color()),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 fn command_suggestion_window_start(selected: usize, suggestion_count: usize) -> usize {
     if suggestion_count <= app::COMMAND_SUGGESTION_VISIBLE_LIMIT {
         0
@@ -235,6 +307,13 @@ fn dim_command_color(color: Option<Color>) -> Color {
 }
 
 pub(super) fn input_hint_line_height(app: &dyn TuiState) -> u16 {
+    // Path-completion popup takes priority over the slash-command popup.
+    // The two never co-occur: the input layer guarantees that.
+    let path_suggestions = app.path_completion_suggestions();
+    if !path_suggestions.is_empty() {
+        return path_suggestion_hint_line_count(&path_suggestions);
+    }
+
     let suggestions = app.command_suggestions();
     let mode = composer_mode(app.input(), app.is_remote_mode());
     let has_suggestions = !suggestions.is_empty()
@@ -1926,10 +2005,12 @@ pub(super) fn draw_input(
     let cursor_pos = app.cursor_pos();
 
     let mode = composer_mode(input_text, app.is_remote_mode());
+    let path_suggestions = app.path_completion_suggestions();
     let suggestions = app.command_suggestions();
     let has_suggestions = !suggestions.is_empty()
         && matches!(mode, ComposerMode::SlashCommand | ComposerMode::Chat)
         && (matches!(mode, ComposerMode::SlashCommand) || !app.is_processing());
+    let has_path_suggestions = !path_suggestions.is_empty();
 
     let (prompt_char, caret_color) = input_prompt(app);
     let num_str = format!("{}", next_prompt);
@@ -1955,7 +2036,9 @@ pub(super) fn draw_input(
     let mut hint_shown = false;
     let mut hint_line: Option<String> = None;
     let mut suggestion_lines: Vec<Line> = Vec::new();
-    if has_suggestions {
+    if has_path_suggestions {
+        suggestion_lines = path_suggestion_lines(app, &path_suggestions);
+    } else if has_suggestions {
         suggestion_lines = command_suggestion_lines(app, &suggestions);
     } else if let Some(shell_hint) = shell_mode_hint(mode) {
         hint_shown = true;

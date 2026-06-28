@@ -35,6 +35,7 @@ include!("tests/onboarding_golden.rs");
 include!("tests/onboarding_eval.rs");
 include!("tests/reasoning_region.rs");
 include!("tests/smoothness_benchmark.rs");
+include!("tests/path_completion.rs");
 
 #[test]
 fn kv_cache_signature_prefix_match_allows_appended_messages() {

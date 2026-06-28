@@ -1090,6 +1090,45 @@ impl App {
         }
     }
 
+    /// Key handler for the path-completion popup. Up/Down walk the
+    /// selection, Enter applies, Esc dismisses. Returns `true` when the key
+    /// was consumed.
+    pub(super) fn handle_path_completion_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> bool {
+        if !self.has_path_completion() {
+            return false;
+        }
+        match code {
+            KeyCode::Down
+                if !modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+            {
+                self.move_path_completion_selection(1)
+            }
+            KeyCode::Up
+                if !modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+            {
+                self.move_path_completion_selection(-1)
+            }
+            KeyCode::Char('j') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_path_completion_selection(1)
+            }
+            KeyCode::Char('k') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.move_path_completion_selection(-1)
+            }
+            KeyCode::Enter if modifiers.is_empty() => self.accept_path_completion(),
+            KeyCode::Esc if modifiers.is_empty() => {
+                self.reset_path_completion();
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn accept_selected_command_suggestion(&mut self) -> bool {
         let suggestions = self.clamp_command_suggestion_selection();
         let Some((cmd, _)) = suggestions.get(self.command_suggestion_selected).cloned() else {
@@ -1328,6 +1367,152 @@ impl App {
     pub fn reset_tab_completion(&mut self) {
         self.tab_completion_state = None;
         self.command_suggestion_selected = 0;
+        // Any input mutation invalidates cached path-completion candidates.
+        self.reset_path_completion();
+    }
+
+    // -----------------------------------------------------------------------
+    // Path completion (Tab when the cursor is over a path-like token).
+    //
+    // The completion popup is rendered by `ui_input.rs` from the data exposed
+    // by `path_completion_suggestions` and `path_completion_selected`. Tab
+    // populates the state via `try_path_autocomplete`; Up/Down walk the
+    // selection; Enter applies. Typing invalidates the state.
+    // -----------------------------------------------------------------------
+
+    /// Whether the path-completion popup is currently showing.
+    pub fn has_path_completion(&self) -> bool {
+        self.path_completion
+            .as_ref()
+            .is_some_and(|s| !s.candidates.is_empty())
+    }
+
+    /// Reset path-completion state. Call when the user types or otherwise
+    /// changes the input in a way that invalidates the cached candidates.
+    pub fn reset_path_completion(&mut self) {
+        self.path_completion = None;
+    }
+
+    /// Current path candidates, formatted for the suggestion popup. Returns
+    /// an empty vec when the popup is hidden.
+    pub fn path_completion_suggestions(&self) -> Vec<(String, &'static str)> {
+        let Some(state) = self.path_completion.as_ref() else {
+            return Vec::new();
+        };
+        state
+            .candidates
+            .iter()
+            .map(|c| (c.label.clone(), c.description))
+            .collect()
+    }
+
+    /// Index of the currently highlighted row in the path-completion popup.
+    pub fn path_completion_selected(&self) -> usize {
+        self.path_completion
+            .as_ref()
+            .map(|s| s.selected)
+            .unwrap_or(0)
+    }
+
+    /// Tab handler for path-like tokens. If the token under the cursor looks
+    /// like a path and there are candidates, populate the popup and apply the
+    /// first match. Returns `true` when a popup is now active.
+    pub fn try_path_autocomplete(&mut self) -> bool {
+        // Reuse the session's working directory as the base for relative paths.
+        let base = self
+            .session
+            .working_dir
+            .as_deref()
+            .map(std::path::Path::new)
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let Some((start, _token, candidates)) =
+            path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
+        else {
+            self.reset_path_completion();
+            return false;
+        };
+        if candidates.is_empty() {
+            self.reset_path_completion();
+            return false;
+        }
+
+        let mut state = path_completion::PathCompletionState::new(
+            start,
+            self.cursor_pos,
+            candidates.clone(),
+        );
+        // Apply the first candidate immediately so the user gets instant
+        // feedback; further Tab presses cycle the selection.
+        let (new_input, new_cursor) = state.apply(&self.input);
+        self.remember_input_undo_state();
+        self.input = new_input;
+        self.cursor_pos = new_cursor;
+        // After the apply, the popup's token_end is the new cursor position
+        // (which is also the end of the inserted value). Persist that.
+        state.token_end = new_cursor;
+        self.path_completion = Some(state);
+        true
+    }
+
+    /// Tab handler for the second-and-later Tab: cycle to the next candidate
+    /// in the existing popup without re-running path resolution.
+    pub fn cycle_path_completion(&mut self) -> bool {
+        // Compute the new selection and apply it in a single, non-overlapping
+        // borrow window to satisfy the borrow checker.
+        let (start, end, selected, candidates) = {
+            let Some(state) = self.path_completion.as_ref() else {
+                return false;
+            };
+            if state.candidates.is_empty() {
+                return false;
+            }
+            let len = state.candidates.len();
+            let next = (state.selected + 1) % len;
+            (state.token_start, state.token_end, next, state.candidates.clone())
+        };
+
+        let tmp = path_completion::PathCompletionState {
+            token_start: start,
+            token_end: end,
+            candidates: candidates.clone(),
+            selected,
+        };
+        let (new_input, new_cursor) = tmp.apply(&self.input);
+
+        if let Some(state) = self.path_completion.as_mut() {
+            state.selected = selected;
+            state.token_start = start;
+            state.token_end = new_cursor;
+        }
+        self.remember_input_undo_state();
+        self.input = new_input;
+        self.cursor_pos = new_cursor;
+        true
+    }
+
+    /// Arrow-key handler: move the popup selection by `delta` (with wrap).
+    pub fn move_path_completion_selection(&mut self, delta: i32) -> bool {
+        let Some(state) = self.path_completion.as_mut() else {
+            return false;
+        };
+        state.move_selection(delta)
+    }
+
+    /// Enter handler: apply the currently selected candidate and dismiss the
+    /// popup. Returns `true` if the input changed.
+    pub fn accept_path_completion(&mut self) -> bool {
+        let Some(state) = self.path_completion.take() else {
+            return false;
+        };
+        let (new_input, new_cursor) = state.apply(&self.input);
+        if new_input == self.input {
+            return false;
+        }
+        self.remember_input_undo_state();
+        self.input = new_input;
+        self.cursor_pos = new_cursor;
+        true
     }
 
     pub(super) fn remember_input_undo_state(&mut self) {

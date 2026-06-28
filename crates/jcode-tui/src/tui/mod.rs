@@ -248,6 +248,16 @@ pub trait TuiState {
     fn command_suggestion_selected(&self) -> usize {
         0
     }
+    /// Path-completion candidates for the token under the cursor. Returns an
+    /// empty vec when no popup is active. The popup is independent of the
+    /// slash-command popup; the two never co-occur.
+    fn path_completion_suggestions(&self) -> Vec<(String, &'static str)> {
+        Vec::new()
+    }
+    /// Index of the highlighted row in the path-completion popup.
+    fn path_completion_selected(&self) -> usize {
+        0
+    }
     fn active_skill(&self) -> Option<String>;
     fn subagent_status(&self) -> Option<String>;
     /// Progress of a currently-running batch tool call.

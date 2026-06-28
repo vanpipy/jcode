@@ -75,6 +75,7 @@ mod observe;
 pub(crate) mod onboarding_flow;
 mod onboarding_flow_control;
 mod onboarding_repair;
+mod path_completion;
 mod productivity;
 mod remote;
 mod remote_notifications;
@@ -105,6 +106,9 @@ pub(crate) fn extract_input_shell_command(input: &str) -> Option<&str> {
 }
 
 pub(crate) const COMMAND_SUGGESTION_VISIBLE_LIMIT: usize = 8;
+
+/// Maximum rows of the path-completion popup that may be on screen at once.
+pub(crate) const PATH_SUGGESTION_VISIBLE_LIMIT: usize = 3;
 
 fn active_runtime_provider_key() -> Option<String> {
     std::env::var("JCODE_RUNTIME_PROVIDER")
@@ -1222,6 +1226,11 @@ pub struct App {
     tab_completion_state: Option<(String, usize)>,
     // Selected row in the visible command suggestion list.
     command_suggestion_selected: usize,
+    // Path-completion popup state. When `Some`, the TUI shows up to
+    // `PATH_SUGGESTION_VISIBLE_LIMIT` rows of file/folder candidates and the
+    // selected index drives the row highlight. Activated by Tab when the
+    // token under the cursor looks like a path.
+    path_completion: Option<path_completion::PathCompletionState>,
     // Time when app started (for startup animations)
     app_started: Instant,
     // Whether the client terminal currently has focus. When the terminal window

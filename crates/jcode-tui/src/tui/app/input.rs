@@ -1919,7 +1919,16 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Tab => {
-            app.autocomplete();
+            // Path completion takes priority over command completion when the
+            // token under the cursor looks like a path (contains `/` or
+            // starts with `~`). Repeated Tabs cycle the popup.
+            if app.path_completion.is_some() {
+                app.cycle_path_completion();
+            } else if app.try_path_autocomplete() {
+                // Popup is now active; nothing more to do.
+            } else {
+                app.autocomplete();
+            }
             true
         }
         KeyCode::Up | KeyCode::PageUp => {
@@ -2109,6 +2118,10 @@ impl App {
         }
 
         if self.handle_command_suggestion_key(code, modifiers) {
+            return Ok(());
+        }
+
+        if self.handle_path_completion_key(code, modifiers) {
             return Ok(());
         }
 
