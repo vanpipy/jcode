@@ -104,7 +104,17 @@ impl PathToken {
         }
 
         // Normal form: split into (parent, basename_prefix).
-        let (parent_str, prefix) = raw.rsplit_once('/')?;
+        let (parent_str_raw, prefix) = raw.rsplit_once('/')?;
+        // For absolute paths like "/ho" or "/etc/ho", `rsplit_once('/')`
+        // yields an empty parent string (""). Normalize that to "/" so the
+        // search dir resolves to the filesystem root, mirroring pi's
+        // behavior of treating "/" as the parent of any leading-slash
+        // token whose first segment has no directory in front of it.
+        let parent_str = if parent_str_raw.is_empty() && raw.starts_with('/') {
+            "/"
+        } else {
+            parent_str_raw
+        };
         let parent = match expand_home(parent_str) {
             Some(p) => PathBuf::from(p),
             None => return None,

@@ -13,6 +13,8 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 
+use crate::tui::app::path_completion::PathToken;
+
 fn unique_tmp_dir(label: &str) -> PathBuf {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
@@ -309,12 +311,12 @@ fn path_popup_actually_renders_into_terminal() {
 }
 
 #[test]
-fn chinese_prefix_then_absolute_path_tab_works() {
-    // User-reported scenario: `查看路径 /ho` followed by Tab. The presence of
+fn chinese_prefix_then_relative_path_tab_works() {
+    // User-reported scenario: `查看路径 ./ho` followed by Tab. The presence of
     // Chinese characters BEFORE the path token must not interfere with path
-    // detection. The token under the cursor is `/ho`, which should resolve
+    // detection. The token under the cursor is `./ho`, which should resolve
     // against the working directory's entries.
-    let tmp = unique_tmp_dir("zh_abs");
+    let tmp = unique_tmp_dir("zh_rel");
     fs::create_dir(tmp.join("home")).unwrap();
     fs::create_dir(tmp.join("hot")).unwrap();
     fs::write(tmp.join("hello.txt"), b"").unwrap();
@@ -322,7 +324,7 @@ fn chinese_prefix_then_absolute_path_tab_works() {
 
     let mut app = create_test_app();
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
-    app.input = "查看路径 /ho".to_string();
+    app.input = "查看路径 ./ho".to_string();
     app.cursor_pos = app.input.len();
 
     handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
@@ -334,7 +336,7 @@ fn chinese_prefix_then_absolute_path_tab_works() {
         .collect();
     assert!(
         app.has_path_completion(),
-        "Tab on `查看路径 /ho` must trigger the path popup, suggestions were: {:?}",
+        "Tab on `查看路径 ./ho` must trigger the path popup, suggestions were: {:?}",
         suggestions
     );
     // `ho` should match entries starting with `ho` (case-insensitive).
@@ -353,11 +355,11 @@ fn chinese_prefix_then_absolute_path_tab_works() {
         "non-matching README must be filtered out, got: {:?}",
         suggestions
     );
-    // The token text `/ho` must be replaced by the applied candidate
-    // (slash-rooted form), preserving the prefix the user already typed.
+    // The token text `./ho` must be replaced by the applied candidate
+    // (relative form), preserving the Chinese prefix the user already typed.
     assert!(
-        app.input.contains("/home/"),
-        "applying the first candidate should rewrite `/ho` to `/home/`, got: {:?}",
+        app.input.contains("./home/"),
+        "applying the first candidate should rewrite `./ho` to `./home/`, got: {:?}",
         app.input
     );
     assert!(
@@ -367,4 +369,45 @@ fn chinese_prefix_then_absolute_path_tab_works() {
     );
 
     fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn absolute_path_searches_from_filesystem_root() {
+    // A leading-slash token whose first segment has no directory in front
+    // (e.g. `/ho`) must search the *filesystem root* `/`, NOT the session
+    // working directory. This mirrors pi's behavior: `dirname("/ho") === "/"`
+    // and `basename("/ho") === "ho"`, so the search dir is `/` and the
+    // needle is `ho`.
+    let token = PathToken::parse("/ho").expect("/ho must parse");
+    assert_eq!(
+        token.parent.as_deref(),
+        Some(std::path::Path::new("/")),
+        "/ho must resolve its parent to the filesystem root, got: {:?}",
+        token.parent
+    );
+    assert_eq!(token.prefix, "ho");
+    assert!(!token.is_root_listing);
+
+    // The "list contents" form: `/tmp/` should also resolve parent to `/tmp`
+    // (absolute), and prefix to "".
+    let token = PathToken::parse("/tmp/").expect("/tmp/ must parse");
+    assert_eq!(
+        token.parent.as_deref(),
+        Some(std::path::Path::new("/tmp")),
+        "/tmp/ must keep its absolute parent, got: {:?}",
+        token.parent
+    );
+    assert_eq!(token.prefix, "");
+    assert!(token.descendent);
+    assert!(!token.is_root_listing);
+
+    // And the multi-segment absolute form: `/etc/hos` should look in /etc.
+    let token = PathToken::parse("/etc/hos").expect("/etc/hos must parse");
+    assert_eq!(
+        token.parent.as_deref(),
+        Some(std::path::Path::new("/etc")),
+        "/etc/hos must resolve its parent to /etc, got: {:?}",
+        token.parent
+    );
+    assert_eq!(token.prefix, "hos");
 }
