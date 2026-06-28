@@ -155,6 +155,85 @@ fn reset_tab_completion_also_clears_path_state() {
 }
 
 #[test]
+fn tab_with_bare_token_triggers_path_popup() {
+    // pi-mono behavior: Tab on a bare word (no `/`, no `~`) lists entries of
+    // the working directory whose name starts with that word. This is what
+    // makes Tab useful for ordinary "Pro → Project/" completions.
+    let tmp = unique_tmp_dir("bare_token");
+    fs::create_dir(tmp.join("Project")).unwrap();
+    fs::create_dir(tmp.join("Projectile")).unwrap();
+    fs::write(tmp.join("article.txt"), b"").unwrap();
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
+    app.input = "look at Pro".to_string();
+    app.cursor_pos = app.input.len();
+
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    assert!(
+        app.has_path_completion(),
+        "Tab on a bare word must trigger the path popup"
+    );
+    let labels: Vec<String> = app
+        .path_completion_suggestions()
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    assert!(
+        labels.iter().any(|l| l == "Project/"),
+        "bare-token Tab should list Pro* entries, got {:?}",
+        labels
+    );
+    assert!(labels.iter().any(|l| l == "Projectile/"));
+    assert!(!labels.iter().any(|l| l.starts_with("article")));
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn tab_on_slash_command_root_falls_through_to_command_completion() {
+    // A `/cmd` token at the very start of the line (no space yet) belongs to
+    // the command-completion popup, not the path popup. pi-mono enforces the
+    // same exclusion in `shouldTriggerFileCompletion`.
+    let tmp = unique_tmp_dir("slash_root");
+    fs::create_dir(tmp.join("Project")).unwrap();
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
+    app.input = "/co".to_string();
+    app.cursor_pos = app.input.len();
+
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    assert!(
+        !app.has_path_completion(),
+        "Tab on `/cmd` at line root must NOT open the path popup"
+    );
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn tab_on_slash_command_with_args_still_triggers_path_popup() {
+    // Once the slash command has been completed and a space added, Tab on
+    // the argument should behave like a regular path-completion trigger.
+    let tmp = unique_tmp_dir("slash_arg");
+    fs::create_dir(tmp.join("Project")).unwrap();
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
+    app.input = "/model Pro".to_string();
+    app.cursor_pos = app.input.len();
+
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    assert!(
+        app.has_path_completion(),
+        "Tab on the argument of a slash command must open the path popup"
+    );
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
 fn trailing_slash_descends_into_directory() {
     let tmp = unique_tmp_dir("descend");
     let sub = tmp.join("Project");

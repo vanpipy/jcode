@@ -3,8 +3,13 @@
 //! Implements a small subset of pi's path-completion behavior, used by the TUI
 //! to power Tab-driven `@`-free path suggestions:
 //!
-//! * Trigger: any whitespace-delimited token that contains a `/` or starts with
-//!   `~`. Slash-command tokens (leading `/`) are handled elsewhere.
+//! * Trigger: Tab. The token under the cursor is always tried (mirroring pi's
+//!   `force=true` semantics); the only exclusion is a `/`-prefixed slash
+//!   command at the very start of the line. The token can therefore be:
+//!     - a bare word like `Pro` — treated as a prefix within the session's
+//!       working directory,
+//!     - a relative or absolute path like `./foo` or `/etc/host`,
+//!     - a `~/`-rooted home-relative path like `~/Project`.
 //! * Match: case-insensitive `startsWith` against the entries of the relevant
 //!   directory. Hidden files and the user's `~`-relative root itself are
 //!   skipped (matching `pi`'s `~/` directory rules).
@@ -42,13 +47,13 @@ pub struct PathToken {
 }
 
 impl PathToken {
-    /// Analyze a candidate token. Returns `None` if the token does not look
-    /// like a path at all (no `/`, no leading `~`, empty).
+    /// Analyze a candidate token. Returns `None` only when the token is empty.
+    /// Any non-empty whitespace-delimited token is accepted; bare words are
+    /// interpreted as a prefix within the session working directory (this is
+    /// how `Tab` forces completion of otherwise-ambiguous tokens, mirroring
+    /// pi-mono's `force=true` semantics).
     pub fn parse(token: &str) -> Option<Self> {
         if token.is_empty() {
-            return None;
-        }
-        if !token.contains('/') && !token.starts_with('~') {
             return None;
         }
 
@@ -83,6 +88,18 @@ impl PathToken {
                 prefix: String::new(),
                 descendent: true,
                 is_root_listing: false,
+            });
+        }
+
+        // Bare token (no `/`, no `~`): treat the entire token as a prefix
+        // within the session working directory. The caller fills in the base.
+        if !raw.contains('/') && !raw.starts_with('~') {
+            return Some(Self {
+                raw: raw.clone(),
+                parent: None,
+                prefix: raw,
+                descendent: false,
+                is_root_listing: true,
             });
         }
 
@@ -303,7 +320,7 @@ pub fn list_candidates(token: &PathToken, base: &Path) -> Vec<PathCandidate> {
 /// path candidates for the token under the cursor, plus the byte offset of
 /// the token start (so callers can replace just that span).
 ///
-/// Returns `None` if the token under the cursor is not path-like.
+/// Returns `None` if there is no non-whitespace token under the cursor.
 pub fn candidates_at_cursor(
     line: &str,
     col: usize,
@@ -318,7 +335,10 @@ pub fn candidates_at_cursor(
         .last()
         .map(|(i, _)| i)
         .or(if before.is_empty() { None } else { Some(0) })?;
-    let token_str = &line[start..col];
+    // Strip any trailing whitespace from the slice we hand to the parser;
+    // we still want the *byte range* to extend up to `col` so the apply
+    // step leaves the user's surrounding whitespace untouched.
+    let token_str = before[start..].trim_end();
     if token_str.is_empty() {
         return None;
     }
@@ -460,8 +480,18 @@ mod tests {
     // --- PathToken::parse ---
 
     #[test]
-    fn parse_rejects_bare_word() {
-        assert!(PathToken::parse("hello").is_none());
+    fn parse_accepts_bare_word_as_prefix() {
+        // Bare non-empty words are treated as a prefix within the session
+        // working directory (pi's force=true behavior).
+        let t = PathToken::parse("hello").unwrap();
+        assert_eq!(t.raw, "hello");
+        assert_eq!(t.prefix, "hello");
+        assert!(t.is_root_listing);
+        assert!(!t.descendent);
+        assert!(t.parent.is_none());
+
+        // Empty token is still rejected so callers can tell "no token here"
+        // apart from "token with empty prefix".
         assert!(PathToken::parse("").is_none());
     }
 
@@ -529,6 +559,32 @@ mod tests {
         // Files not matching the prefix must not be included.
         assert!(!names.iter().any(|n| n.starts_with("article")));
         assert!(!names.iter().any(|n| n.starts_with("readme")));
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn bare_token_lists_base_dir_with_prefix() {
+        // A bare word (no `/`, no `~`) is treated as a prefix within the
+        // session working directory. This is what Tab triggers on plain text.
+        let tmp = unique_tmp_dir("bare_list");
+        mkdir(&tmp, "Project");
+        mkdir(&tmp, "Projectile");
+        touch(&tmp, "article.txt");
+
+        let t = PathToken::parse("Pro").unwrap();
+        assert!(t.is_root_listing);
+        let cands = list_candidates(&t, &tmp);
+        let names: Vec<&str> = cands.iter().map(|c| c.label.as_str()).collect();
+        assert!(names.contains(&"Project/"));
+        assert!(names.contains(&"Projectile/"));
+        assert!(!names.iter().any(|n| n.starts_with("article")));
+
+        // The applied value is just the entry name (no prefix, no slash on
+        // files; trailing slash on directories).
+        let proj = cands.iter().find(|c| c.label == "Project/").unwrap();
+        assert_eq!(proj.value, "Project/");
+        assert!(proj.is_dir);
 
         fs::remove_dir_all(&tmp).ok();
     }
@@ -643,15 +699,40 @@ mod tests {
     }
 
     #[test]
-    fn candidates_at_cursor_empty_token_returns_none() {
-        let r = candidates_at_cursor("hello ", 6, Path::new("/tmp"));
-        assert!(r.is_none());
+    fn candidates_at_cursor_trailing_whitespace_returns_bare_word() {
+        // Cursor at end of line after whitespace: there is still a token
+        // under the cursor ("hello"), so we return Some((_, token, candidates)).
+        // For /tmp (which is empty in the test environment) the candidate list
+        // is empty, but the call itself must succeed because the parser now
+        // accepts bare tokens as Tab-forced prefixes.
+        let (_, token, cands) = candidates_at_cursor("hello ", 6, Path::new("/tmp")).unwrap();
+        assert_eq!(token.raw, "hello");
+        assert!(cands.is_empty());
+
+        // Truly empty token (cursor at column 0 of an empty line) returns None.
+        assert!(candidates_at_cursor("", 0, Path::new("/tmp")).is_none());
     }
 
     #[test]
-    fn candidates_at_cursor_non_path_token_returns_none() {
-        let r = candidates_at_cursor("hello world", 11, Path::new("/tmp"));
-        assert!(r.is_none());
+    fn candidates_at_cursor_bare_word_returns_base_listing() {
+        // With Tab-forcing semantics, any non-empty bare token under the
+        // cursor should yield candidates from the base directory. We do not
+        // need to assert specific file names here — just that the call
+        // returns Some((start, token, candidates)) with `start` pointing at
+        // the token's beginning.
+        let tmp = unique_tmp_dir("bare_cursor");
+        touch(&tmp, "ProjectA");
+        touch(&tmp, "ProjectB");
+
+        let line = "look at Pro and stop";
+        let col = line.find("Pro").unwrap() + "Pro".len();
+        let (start, token, cands) = candidates_at_cursor(line, col, &tmp).unwrap();
+        assert_eq!(&line[start..col], "Pro");
+        assert_eq!(token.raw, "Pro");
+        assert!(cands.iter().any(|c| c.label == "ProjectA"));
+        assert!(cands.iter().any(|c| c.label == "ProjectB"));
+
+        fs::remove_dir_all(&tmp).ok();
     }
 
     // --- expand_home ---

@@ -1919,12 +1919,19 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Tab => {
-            // Path completion takes priority over command completion when the
-            // token under the cursor looks like a path (contains `/` or
-            // starts with `~`). Repeated Tabs cycle the popup.
+            // Path completion takes priority over command completion. Tab
+            // forces a path-completion attempt on whatever token is under the
+            // cursor (mirroring pi-mono's `force=true` behavior) so that even
+            // a bare word like `Pro` will list Pro* entries in the working
+            // directory. The one exception: a slash command being typed at
+            // the very start of the line (no space yet) belongs to the
+            // command-completion popup.
+            let trimmed = app.input.trim_start();
+            let is_slash_command_root =
+                trimmed.starts_with('/') && !trimmed.contains(' ');
             if app.path_completion.is_some() {
                 app.cycle_path_completion();
-            } else if app.try_path_autocomplete() {
+            } else if !is_slash_command_root && app.try_path_autocomplete() {
                 // Popup is now active; nothing more to do.
             } else {
                 app.autocomplete();
