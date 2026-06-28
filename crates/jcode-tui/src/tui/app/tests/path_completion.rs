@@ -307,3 +307,64 @@ fn path_popup_actually_renders_into_terminal() {
 
     fs::remove_dir_all(&tmp).ok();
 }
+
+#[test]
+fn chinese_prefix_then_absolute_path_tab_works() {
+    // User-reported scenario: `查看路径 /ho` followed by Tab. The presence of
+    // Chinese characters BEFORE the path token must not interfere with path
+    // detection. The token under the cursor is `/ho`, which should resolve
+    // against the working directory's entries.
+    let tmp = unique_tmp_dir("zh_abs");
+    fs::create_dir(tmp.join("home")).unwrap();
+    fs::create_dir(tmp.join("hot")).unwrap();
+    fs::write(tmp.join("hello.txt"), b"").unwrap();
+    fs::write(tmp.join("README"), b"").unwrap();
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
+    app.input = "查看路径 /ho".to_string();
+    app.cursor_pos = app.input.len();
+
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+
+    let suggestions: Vec<String> = app
+        .path_completion_suggestions()
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect();
+    assert!(
+        app.has_path_completion(),
+        "Tab on `查看路径 /ho` must trigger the path popup, suggestions were: {:?}",
+        suggestions
+    );
+    // `ho` should match entries starting with `ho` (case-insensitive).
+    assert!(
+        suggestions.iter().any(|l| l == "home/"),
+        "expected home/ in suggestions, got: {:?}",
+        suggestions
+    );
+    assert!(
+        suggestions.iter().any(|l| l == "hot/"),
+        "expected hot/ in suggestions, got: {:?}",
+        suggestions
+    );
+    assert!(
+        !suggestions.iter().any(|l| l.contains("README")),
+        "non-matching README must be filtered out, got: {:?}",
+        suggestions
+    );
+    // The token text `/ho` must be replaced by the applied candidate
+    // (slash-rooted form), preserving the prefix the user already typed.
+    assert!(
+        app.input.contains("/home/"),
+        "applying the first candidate should rewrite `/ho` to `/home/`, got: {:?}",
+        app.input
+    );
+    assert!(
+        app.input.starts_with("查看路径 "),
+        "Chinese prefix must be preserved verbatim, got: {:?}",
+        app.input
+    );
+
+    fs::remove_dir_all(&tmp).ok();
+}
