@@ -4,6 +4,7 @@ use super::{
     App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, SkillRegistry,
     commands, ctrl_bracket_fallback_to_esc, is_context_limit_error,
     is_request_payload_too_large_error, path_completion, remote,
+    state_ui_input_helpers::find_hash_mode_token_start,
 };
 use crate::bus::{
     Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
@@ -1921,24 +1922,31 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Tab => {
             // Path completion has two entry points:
             //
-            // 1. `#`-prefix mode (the recommended one): typing `#` at the
-            //    start of an empty input enters path mode, analogous to how
-            //    `/` enters command mode. In this mode Tab triggers path
-            //    completion regardless of the rest of the input.
+            // 1. `#`-prefix mode (the recommended one): the user typed `#`
+            //    either at the start of the input or after a token
+            //    boundary (whitespace, CJK/ASCII punctuation). This
+            //    mirrors how `/` enters command mode — both `#` and
+            //    `/` fire anywhere in the input where they sit at a
+            //    token boundary. This handles `#/ho`, `现在，#/ho`,
+            //    `see: #./home`, etc.
             //
             // 2. Delimiter-bearing token: if the cursor sits on a token
-            //    that already contains a path separator (`/`, `~`, or `.`
-            //    as a directory marker), we still attempt path completion
-            //    on that token as a fallback for users who started typing
-            //    a path without the `#` marker. Bare words without any
-            //    separator (e.g. `Pro`) do NOT trigger — use `#Pro`.
+            //    that already contains a path separator (`/`, `~`, or
+            //    `.` as a directory marker), we still attempt path
+            //    completion on that token as a fallback for users who
+            //    started typing a path without the `#` marker. Bare
+            //    words without any separator (e.g. `Pro`) do NOT
+            //    trigger — use `#Pro`.
             //
-            // Slash commands at the very start of the line (no space) take
-            // precedence over both: those belong to the command popup.
+            // Slash commands at the very start of the line (no space)
+            // take precedence over both: those belong to the command
+            // popup.
             let trimmed = app.input.trim_start();
             let is_slash_command_root =
                 trimmed.starts_with('/') && !trimmed.contains(' ');
-            let is_hash_path_mode = app.input.starts_with('#');
+            // Check both line-start and mid-string `#` for hash mode.
+            let is_hash_path_mode =
+                find_hash_mode_token_start(&app.input, app.cursor_pos).is_some();
             // Cheap precheck: does the token under the cursor contain a
             // path separator? We use this to gate the fallback path so we
             // don't silently mutate the input for arbitrary prose.

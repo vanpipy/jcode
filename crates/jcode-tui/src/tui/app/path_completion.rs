@@ -331,6 +331,13 @@ pub fn list_candidates(token: &PathToken, base: &Path) -> Vec<PathCandidate> {
 /// the token start (so callers can replace just that span).
 ///
 /// Returns `None` if there is no non-whitespace token under the cursor.
+///
+/// **Token boundaries.** Whitespace splits tokens, as you'd expect. But we also
+/// treat ASCII punctuation and fullwidth CJK punctuation (`,`, `。`, `：`,
+/// `！`, `？`, `、`, `「` … `」`, etc.) as boundaries — that way a token like
+/// `./ho` is recognised even when it's glued onto Chinese prose such as
+/// `路径：./ho` or `现在，./foo`. CJK ideographs and kana are NOT boundaries,
+/// so a path like `数据/file.txt` stays intact.
 pub fn candidates_at_cursor(
     line: &str,
     col: usize,
@@ -341,7 +348,7 @@ pub fn candidates_at_cursor(
     let start = before
         .char_indices()
         .rev()
-        .take_while(|(_, c)| !c.is_whitespace())
+        .take_while(|(_, c)| !is_token_boundary(*c))
         .last()
         .map(|(i, _)| i)
         .or(if before.is_empty() { None } else { Some(0) })?;
@@ -355,6 +362,48 @@ pub fn candidates_at_cursor(
     let token = PathToken::parse(token_str)?;
     let candidates = list_candidates(&token, base);
     Some((start, token, candidates))
+}
+
+/// True if `c` should be treated as a boundary between path tokens inside the
+/// input line — i.e. a delimiter that ends one token and starts the next.
+///
+/// Boundaries include:
+/// - ASCII whitespace (`' '`, `'\t'`, `'\n'`, `'\r'`)
+/// - ASCII punctuation that wouldn't normally appear inside a path basename
+///   (`,`, `;`, `!`, `?`, `(`, `)`, `[`, `]`, `{`, `}`, `'`, `"`, `<`, `>`,
+///   `|`, `\`, `` ` ``)
+/// - Fullwidth CJK punctuation blocks (`，`, `。`, `：`, `；`, `！`, `？`,
+///   `（`, `）`, `【`, `】`, `《`, `》`, `「`, `」`, `、`, `～` …)
+///
+/// NOT boundaries (so paths containing them stay intact):
+/// - CJK ideographs, kana, hangul — these are common inside real paths
+///   like `数据/文件.txt`.
+/// - `/`, `.`, `~`, `-`, `_`, `+`, `=`, `*`, `&`, `^`, `%`, `$`, `#`, `@`
+///   — all valid inside a path segment.
+fn is_token_boundary(c: char) -> bool {
+    if c.is_whitespace() {
+        return true;
+    }
+    if c.is_ascii() {
+        // Allow these ASCII chars inside a path segment.
+        // (Note: `#` is treated as a hash-mode marker at a higher layer; we
+        // intentionally do NOT include it here so paths beginning with `#`
+        // like `\#weird-file` aren't split.)
+        if matches!(c, '/' | '.' | '~' | '-' | '_' | '+' | '=' | '*' | '&' | '^' | '%' | '$' | '@' | '#') {
+            return false;
+        }
+        // Everything else in ASCII that's punctuation-like is a boundary.
+        return c.is_ascii_punctuation();
+    }
+    // Non-ASCII: treat CJK punctuation blocks as boundaries. CJK ideographs,
+    // kana, hangul, etc. are NOT boundaries.
+    let cp = c as u32;
+    matches!(cp,
+        0x3000..=0x303F // CJK Symbols and Punctuation (、 。 「 」 『 』 …)
+        | 0xFF00..=0xFFEF // Halfwidth and Fullwidth Forms (， ． ： ； ！ ？ （ ）)
+        | 0x2010..=0x2027 // Hyphens, dashes, and basic interpunctuation
+        | 0x2030..=0x205E // Misc technical / punctuation
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -746,6 +795,40 @@ mod tests {
         assert_eq!(token.raw, "Pro");
         assert!(cands.iter().any(|c| c.label == "ProjectA"));
         assert!(cands.iter().any(|c| c.label == "ProjectB"));
+
+        fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn candidates_at_cursor_splits_at_fullwidth_punctuation() {
+        // The token under the cursor should start at the `./ho` even when
+        // glued onto Chinese prose (no whitespace between them). This is
+        // the "现在，./ho" / "路径：./ho" case.
+        let tmp = unique_tmp_dir("cjk_boundary");
+        touch(&tmp, "home");
+        touch(&tmp, "hot");
+
+        let cases = [
+            ("现在，./ho", "./ho"),
+            ("路径：./ho", "./ho"),
+            ("see ./ho", "./ho"), // ASCII space — sanity baseline
+            ("数据/file.txt", "数据/file.txt"), // CJK ideograph is NOT a boundary
+            ("check: ./ho", "./ho"), // ASCII colon still works
+        ];
+        for (line, expected_token) in cases {
+            let col = line.len();
+            let (start, token, _cands) = candidates_at_cursor(line, col, &tmp)
+                .unwrap_or_else(|| panic!("expected token for line={:?}", line));
+            assert_eq!(
+                &line[start..col],
+                expected_token,
+                "line={:?} should produce token {:?}, got {:?}",
+                line,
+                expected_token,
+                &line[start..col]
+            );
+            assert_eq!(token.raw, expected_token);
+        }
 
         fs::remove_dir_all(&tmp).ok();
     }

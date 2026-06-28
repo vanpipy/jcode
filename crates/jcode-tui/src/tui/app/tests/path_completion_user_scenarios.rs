@@ -220,18 +220,18 @@ fn hash_mode_mid_sentence_after_punctuation_fires() {
     // the `./` delimiter — so either the `#`-mode entry point OR the
     // delimiter-bearing fallback will pick them up.
     //
-    // (We don't test the no-whitespace form `路径：./ho` here: when
-    // there's no whitespace between the Chinese colon and the path,
-    // the whole `路径：./ho` becomes a single token whose parser
-    // doesn't recognize `./ho` as the path. That's a separate issue
-    // outside this regression's scope — the user-reported
-    // mid-sentence forms always have whitespace.)
+    // We include the no-whitespace form `路径：./ho`: the parser
+    // recognises it because we now treat fullwidth CJK punctuation
+    // (`：` U+FF1A) as a token boundary too. Same for the
+    // comma-without-space case `现在，./ho`.
     let cases = [
         "see #/ho",
         "see ./ho",
         "check: ./ho",
         "路径： ./ho", // Chinese colon + space
         "现在，#/ho", // Chinese comma + space + #/ho
+        "路径：./ho",  // Chinese colon, NO space — relies on CJK punctuation boundary
+        "现在，./ho",  // Chinese comma, NO space — relies on CJK punctuation boundary
     ];
     for input in cases {
         let mut app = create_test_app();

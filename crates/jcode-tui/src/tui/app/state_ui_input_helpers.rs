@@ -1369,11 +1369,12 @@ impl App {
         self.command_suggestion_selected = 0;
         // Any input mutation invalidates the cached path-completion selection.
         self.reset_path_completion();
-        // After clearing, if we're in `#` mode, auto-populate the popup so
-        // it appears live as the user types — the same way `/` shows
-        // command suggestions without any keypress. This is what makes
-        // `#/ho` + arrow-keys feel as discoverable as `/help`.
-        if self.input.starts_with('#') {
+        // After clearing, if we're in `#` mode (line start OR mid-sentence),
+        // auto-populate the popup so it appears live as the user types —
+        // the same way `/` shows command suggestions without any keypress.
+        // This is what makes `#/ho`, `现在，#/ho`, and `see #./home` all feel
+        // as discoverable as `/help`.
+        if find_hash_mode_token_start(&self.input, self.cursor_pos).is_some() {
             let _ = self.open_hash_mode_popup();
         }
     }
@@ -1445,15 +1446,19 @@ impl App {
     /// Used by both the render path (`path_completion_suggestions`) and
     /// the apply path (`apply_path_completion`).
     ///
-    /// Two entry points are recognized:
+    /// Three entry points are recognized, in priority order:
     ///
-    /// 1. `#` mode — the user typed `#` to enter path mode explicitly.
-    ///    Any token after the `#` produces live candidates.
+    /// 1. `#` mode (recommended) — the user typed `#` either at the
+    ///    start of the input or after a token boundary (whitespace,
+    ///    punctuation, or end-of-input). Everything after that `#`,
+    ///    up to the cursor, is the path token. This handles the
+    ///    common cases `#/ho`, `#./home`, and mid-sentence forms like
+    ///    `现在，#/ho`.
     /// 2. Delimiter-bearing token — the user is typing a path with a
-    ///    recognized prefix (`./`, `../`, `~/`, or `/`). The token must
-    ///    contain a path separator or start with a recognized marker;
-    ///    bare words without separators (e.g. `Pro`) do NOT trigger the
-    ///    popup. Use `#Pro` for that.
+    ///    recognized prefix (`./`, `../`, `~/`, or `/`). The token
+    ///    must contain a path separator or start with a recognized
+    ///    marker; bare words without separators (e.g. `Pro`) do NOT
+    ///    trigger the popup. Use `#Pro` for that.
     fn live_path_candidates(&self) -> Vec<path_completion::PathCandidate> {
         let base = self
             .session
@@ -1463,38 +1468,37 @@ impl App {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
 
-        let result = if let Some(after_hash) = self.input.strip_prefix('#') {
-            // Hash mode: token is everything after the `#` (with leading
-            // whitespace tolerated), up to the cursor.
-            let leading_ws = after_hash.len() - after_hash.trim_start().len();
-            let token_start = 1 + leading_ws;
+        // 1. `#` mode: handle `#` at line start AND mid-sentence
+        //    (e.g. `现在，#/ho`). The hash must be at a token
+        //    boundary so that mid-word `#` in tags like `foo#bar`
+        //    doesn't trigger path completion by accident.
+        if let Some(hash_token_start) = find_hash_mode_token_start(&self.input, self.cursor_pos) {
             let token_end = self.cursor_pos.min(self.input.len());
-            if token_end <= token_start {
-                Vec::new()
-            } else {
-                let parser_slice = self.input[token_start..token_end].trim_end();
-                match path_completion::PathToken::parse(parser_slice) {
-                    Some(parsed) => path_completion::list_candidates(&parsed, &base),
-                    None => Vec::new(),
-                }
-            }
-        } else {
-            // Delimiter-bearing token fallback. Only treat the token as a
-            // path when it carries an unambiguous path marker — otherwise
-            // we'd pop up suggestions for arbitrary prose tokens like
-            // `test` or `Pro`, which is what the user explicitly rejected.
-            match path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base) {
-                Some((_, token, candidates)) => {
-                    if token_has_path_marker(&token.raw) {
-                        candidates
-                    } else {
-                        Vec::new()
+            if token_end > hash_token_start {
+                let parser_slice = self.input[hash_token_start..token_end].trim_end();
+                if !parser_slice.is_empty() {
+                    if let Some(parsed) = path_completion::PathToken::parse(parser_slice) {
+                        return path_completion::list_candidates(&parsed, &base);
                     }
                 }
-                None => Vec::new(),
             }
-        };
-        result
+            return Vec::new();
+        }
+
+        // 2. Delimiter-bearing token fallback. Only treat the token as a
+        //    path when it carries an unambiguous path marker — otherwise
+        //    we'd pop up suggestions for arbitrary prose tokens like
+        //    `test` or `Pro`, which is what the user explicitly rejected.
+        match path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base) {
+            Some((_, token, candidates)) => {
+                if token_has_path_marker(&token.raw) {
+                    candidates
+                } else {
+                    Vec::new()
+                }
+            }
+            None => Vec::new(),
+        }
     }
 
     /// Internal: open the `#`-mode popup without auto-applying. Used by
@@ -1518,39 +1522,46 @@ impl App {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
 
-        // Resolve token range, respecting `#` mode vs. delimiter fallback.
-        let (start, candidates) = if let Some(after_hash) = self.input.strip_prefix('#') {
-            let leading_ws = after_hash.len() - after_hash.trim_start().len();
-            let token_start = 1 + leading_ws;
-            let token_end = self.cursor_pos.min(self.input.len());
-            if token_end <= token_start {
-                self.reset_path_completion();
-                return false;
-            }
-            let parser_slice = self.input[token_start..token_end].trim_end();
-            let Some(parsed) = path_completion::PathToken::parse(parser_slice) else {
-                self.reset_path_completion();
-                return false;
+        // Resolve token range, respecting `#` mode (line start OR mid-string)
+        // vs. delimiter fallback.
+        let (start, candidates) =
+            if let Some(hash_token_start) = find_hash_mode_token_start(&self.input, self.cursor_pos)
+            {
+                let token_end = self.cursor_pos.min(self.input.len());
+                if token_end <= hash_token_start {
+                    self.reset_path_completion();
+                    return false;
+                }
+                let parser_slice = self.input[hash_token_start..token_end].trim_end();
+                let Some(parsed) = path_completion::PathToken::parse(parser_slice) else {
+                    self.reset_path_completion();
+                    return false;
+                };
+                let cands = path_completion::list_candidates(&parsed, &base);
+                if cands.is_empty() {
+                    self.reset_path_completion();
+                    return false;
+                }
+                (hash_token_start, cands)
+            } else {
+                let Some((start, token, cands)) =
+                    path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
+                else {
+                    self.reset_path_completion();
+                    return false;
+                };
+                // Filter to delimiter-bearing tokens only. Bare words like
+                // `Pro` must not silently get rewritten.
+                if !token_has_path_marker(&token.raw) {
+                    self.reset_path_completion();
+                    return false;
+                }
+                if cands.is_empty() {
+                    self.reset_path_completion();
+                    return false;
+                }
+                (start, cands)
             };
-            let cands = path_completion::list_candidates(&parsed, &base);
-            if cands.is_empty() {
-                self.reset_path_completion();
-                return false;
-            }
-            (token_start, cands)
-        } else {
-            let Some((start, _, cands)) =
-                path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
-            else {
-                self.reset_path_completion();
-                return false;
-            };
-            if cands.is_empty() {
-                self.reset_path_completion();
-                return false;
-            }
-            (start, cands)
-        };
 
         let selected = self
             .path_completion_selected
@@ -1636,26 +1647,28 @@ impl App {
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
 
-        if self.input.starts_with('#') {
-            // Hash mode: the token is the slice after `#` (with leading
-            // whitespace tolerated), up to the cursor.
-            let after_hash = &self.input[1..];
-            let leading_ws = after_hash.len() - after_hash.trim_start().len();
-            let token_start = 1 + leading_ws;
+        if let Some(hash_token_start) = find_hash_mode_token_start(&self.input, self.cursor_pos) {
+            // Hash mode (line start OR mid-string): the token is the
+            // slice after `#`, up to the cursor.
             let token_end = self.cursor_pos.min(self.input.len());
-            if token_end <= token_start {
+            if token_end <= hash_token_start {
                 None
             } else {
-                Some(self.input[token_start..token_end].to_string())
+                Some(self.input[hash_token_start..token_end].to_string())
             }
         } else {
             // Delimiter-bearing fallback: extract the token via the
             // same parser the candidate path uses.
-            let Some((start, _, _)) =
+            let Some((start, token, _)) =
                 path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
             else {
                 return None;
             };
+            // Filter to delimiter-bearing tokens only. Bare words like
+            // `Pro` don't have a path token at all from the user's POV.
+            if !token_has_path_marker(&token.raw) {
+                return None;
+            }
             let end = self.cursor_pos.min(self.input.len());
             if end <= start {
                 None
@@ -1677,24 +1690,24 @@ impl App {
             .map(std::path::Path::new)
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        let (start, _) = if let Some(after_hash) = self.input.strip_prefix('#') {
-            let leading_ws = after_hash.len() - after_hash.trim_start().len();
-            let token_start = 1 + leading_ws;
-            let token_end = self.cursor_pos.min(self.input.len());
-            if token_end <= token_start {
-                self.reset_path_completion();
-                return false;
-            }
-            (token_start, ())
-        } else {
-            let Some((start, _, _)) =
-                path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
-            else {
-                self.reset_path_completion();
-                return false;
+        let (start, _) =
+            if let Some(hash_token_start) = find_hash_mode_token_start(&self.input, self.cursor_pos)
+            {
+                let token_end = self.cursor_pos.min(self.input.len());
+                if token_end <= hash_token_start {
+                    self.reset_path_completion();
+                    return false;
+                }
+                (hash_token_start, ())
+            } else {
+                let Some((start, _, _)) =
+                    path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
+                else {
+                    self.reset_path_completion();
+                    return false;
+                };
+                (start, ())
             };
-            (start, ())
-        };
         let selected = self
             .path_completion_selected
             .min(candidates.len().saturating_sub(1));
@@ -1842,6 +1855,120 @@ fn token_has_path_marker(raw: &str) -> bool {
         return false;
     }
     raw.contains('/') || raw.starts_with('~') || raw.starts_with('.')
+}
+
+/// Find the start byte offset (in the input) of the `#`-mode path token
+/// if one is currently being edited, otherwise return `None`.
+///
+/// The hash must be at a **token boundary** so that mid-word `#` in tags
+/// like `foo#bar` doesn't accidentally trigger path completion. A token
+/// boundary is:
+///
+///   - start of the input, or
+///   - preceded by ASCII whitespace, or
+///   - preceded by a CJK / extended-Unicode punctuation / letter
+///     character (e.g. `，` `。` `、` `：` `（` `)` `；` `！` `？`).
+///
+/// We scan from the **end** of the input up to the cursor and return the
+/// start of the suffix token, so the resulting path slice is everything
+/// after the qualifying `#` up to the cursor.
+///
+/// Returns `None` when no `#` is at a token boundary before the cursor,
+/// in which case the caller should fall back to the delimiter-bearing
+/// path or hide the popup.
+pub(super) fn find_hash_mode_token_start(input: &str, cursor: usize) -> Option<usize> {
+    let cursor = cursor.min(input.len());
+    // Walk from the end down to 0; the LAST qualifying `#` before the
+    // cursor wins, so a sequence like `see #/foo #bar` (cursor at end)
+    // resolves to the second `#` token (`bar`).
+    let bytes = input.as_bytes();
+    let mut i = cursor;
+    while i > 0 {
+        // Step backward across UTF-8 char boundaries until we hit a `#`.
+        // We do this on byte indices, then validate that the byte is
+        // actually a `#` codepoint (U+0023) by checking the previous
+        // and following bytes — in UTF-8, `#` is a single byte 0x23
+        // and never appears inside a multi-byte sequence, so a simple
+        // `bytes[i-1] == b'#'` is correct.
+        if bytes[i - 1] == b'#' {
+            let hash_pos = i - 1;
+            // A `#` at offset 0 is always a token boundary.
+            if hash_pos == 0 {
+                return Some(hash_pos + 1);
+            }
+            // The byte immediately before the `#` determines whether
+            // the `#` sits at a token boundary.
+            let prev_byte = bytes[hash_pos - 1];
+            if prev_byte.is_ascii_whitespace() {
+                return Some(hash_pos + 1);
+            }
+            // CJK / fullwidth / extended punctuation. We treat the
+            // common CJK punctuation block plus a handful of
+            // latin-script punctuation marks as token boundaries so
+            // that `现在，#/ho`, `路径：./home`, `see: ./foo` all fire.
+            if is_punctuation_boundary(prev_byte) {
+                return Some(hash_pos + 1);
+            }
+            // Otherwise, the `#` is mid-word (e.g. `foo#bar`) — skip it
+            // and keep scanning backwards for an earlier qualifying `#`.
+            // (Falling through and decrementing is correct.)
+        }
+        // Step back one char (UTF-8 aware). For ASCII this is just -1;
+        // for multi-byte sequences we skip the continuation bytes
+        // (10xxxxxx) until we land on the leading byte.
+        i -= 1;
+        while i > 0 && (bytes[i] & 0b1100_0000) == 0b1000_0000 {
+            i -= 1;
+        }
+    }
+    None
+}
+
+/// Whether the given leading byte marks a Unicode "punctuation" code
+/// point that should serve as a token boundary for hash-mode detection.
+///
+/// Covers common CJK punctuation (U+3000-U+303F, U+FF00-U+FFEF) plus
+/// the ASCII punctuation that frequently appears as a clause separator
+/// (`,`, `.`, `;`, `:`, `!`, `?`, `(`, `)`, `[`, `]`, `{`, `}`, `'`,
+/// `"`). We deliberately include `.` so `see ./home` (no `#`) still
+/// uses the delimiter-bearing fallback rather than swallowing the `.`
+/// into a `#`-mode token.
+fn is_punctuation_boundary(byte: u8) -> bool {
+    // ASCII punctuation / structural separators.
+    if matches!(
+        byte,
+        b',' | b'.'
+            | b';'
+            | b':'
+            | b'!'
+            | b'?'
+            | b'('
+            | b')'
+            | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b'\''
+            | b'"'
+            | b'<'
+            | b'>'
+            | b'`'
+            | b'|'
+            | b'/'
+            | b'\\'
+    ) {
+        return true;
+    }
+    // Common CJK / fullwidth punctuation byte ranges. These code
+    // points are all multi-byte UTF-8 sequences that start with E2 or
+    // EF; we treat any non-ASCII, non-alphanumeric leading byte as a
+    // potential boundary. (Letters like CJK ideographs or Cyrillic
+    // would otherwise be ambiguous, but in the user's test cases —
+    // `现在，#/ho`, `路径：./home` — the punctuation precedes the `#`.)
+    if byte >= 0x80 {
+        return true;
+    }
+    false
 }
 
 #[derive(Clone, Debug)]
