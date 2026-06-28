@@ -3,7 +3,7 @@
 use super::{
     App, ContentBlock, DisplayMessage, Message, ProcessingStatus, Role, SendAction, SkillRegistry,
     commands, ctrl_bracket_fallback_to_esc, is_context_limit_error,
-    is_request_payload_too_large_error, remote,
+    is_request_payload_too_large_error, path_completion, remote,
 };
 use crate::bus::{
     Bus, BusEvent, ClipboardPasteCompleted, ClipboardPasteContent, ClipboardPasteKind,
@@ -1919,20 +1919,50 @@ pub(super) fn handle_basic_key(app: &mut App, code: KeyCode) -> bool {
             true
         }
         KeyCode::Tab => {
-            // Path completion takes priority over command completion. Tab
-            // forces a path-completion attempt on whatever token is under the
-            // cursor (mirroring pi-mono's `force=true` behavior) so that even
-            // a bare word like `Pro` will list Pro* entries in the working
-            // directory. The one exception: a slash command being typed at
-            // the very start of the line (no space yet) belongs to the
-            // command-completion popup.
+            // Path completion has two entry points:
+            //
+            // 1. `#`-prefix mode (the recommended one): typing `#` at the
+            //    start of an empty input enters path mode, analogous to how
+            //    `/` enters command mode. In this mode Tab triggers path
+            //    completion regardless of the rest of the input.
+            //
+            // 2. Delimiter-bearing token: if the cursor sits on a token
+            //    that already contains a path separator (`/`, `~`, or `.`
+            //    as a directory marker), we still attempt path completion
+            //    on that token as a fallback for users who started typing
+            //    a path without the `#` marker. Bare words without any
+            //    separator (e.g. `Pro`) do NOT trigger — use `#Pro`.
+            //
+            // Slash commands at the very start of the line (no space) take
+            // precedence over both: those belong to the command popup.
             let trimmed = app.input.trim_start();
             let is_slash_command_root =
                 trimmed.starts_with('/') && !trimmed.contains(' ');
+            let is_hash_path_mode = app.input.starts_with('#');
+            // Cheap precheck: does the token under the cursor contain a
+            // path separator? We use this to gate the fallback path so we
+            // don't silently mutate the input for arbitrary prose.
+            let has_path_separator = || -> bool {
+                let base = app
+                    .session
+                    .working_dir
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .unwrap_or_else(|| std::path::Path::new("."));
+                let Some((_, token, _)) =
+                    path_completion::candidates_at_cursor(&app.input, app.cursor_pos, base)
+                else {
+                    return false;
+                };
+                let r = &token.raw;
+                r.contains('/') || r.starts_with('~') || r.starts_with('.')
+            };
             if app.path_completion.is_some() {
                 app.cycle_path_completion();
-            } else if !is_slash_command_root && app.try_path_autocomplete() {
-                // Popup is now active; nothing more to do.
+            } else if is_hash_path_mode
+                || !is_slash_command_root && has_path_separator()
+            {
+                app.try_path_autocomplete();
             } else {
                 app.autocomplete();
             }

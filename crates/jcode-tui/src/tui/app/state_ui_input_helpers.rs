@@ -1414,9 +1414,23 @@ impl App {
             .unwrap_or(0)
     }
 
-    /// Tab handler for path-like tokens. If the token under the cursor looks
-    /// like a path and there are candidates, populate the popup and apply the
-    /// first match. Returns `true` when a popup is now active.
+    /// Tab handler for path-like tokens. Two entry modes are supported:
+    ///
+    /// 1. **`#` prefix mode** (the recommended, explicit one): if the input
+    ///    starts with `#`, the path token is everything from the first
+    ///    non-whitespace byte *after* the `#` up to the cursor. The `#`
+    ///    stays in the input as a literal marker and is preserved across
+    ///    apply / cycle. This mirrors how `/` at the start of an empty
+    ///    input enters command-completion mode.
+    ///
+    /// 2. **Delimiter-bearing token mode** (a fallback for paths the user
+    ///    has already partially typed): if the cursor sits on a token
+    ///    that contains a path separator (`./`, `../`, `~/`, `/`, or is a
+    ///    bare relative like `foo/bar`), `candidates_at_cursor` finds it
+    ///    and we run path completion. Bare words without any separator
+    ///    (e.g. `Pro`) no longer trigger — use the `#` prefix for those.
+    ///
+    /// Returns `true` when a popup is now active.
     pub fn try_path_autocomplete(&mut self) -> bool {
         // Reuse the session's working directory as the base for relative paths.
         let base = self
@@ -1426,12 +1440,56 @@ impl App {
             .map(std::path::Path::new)
             .unwrap_or_else(|| std::path::Path::new("."))
             .to_path_buf();
-        let Some((start, _token, candidates)) =
-            path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
-        else {
-            self.reset_path_completion();
-            return false;
+
+        // Branch 1: `#`-prefix mode.
+        //
+        // We resolve the token range ourselves (rather than going through
+        // `candidates_at_cursor`) so that the `#` is treated as a literal
+        // marker that the parser never sees and the apply step never
+        // overwrites. The leading whitespace after `#` is tolerated (so
+        // `# Pro` works the same as `#Pro`); trailing whitespace is
+        // *kept* in the input — only the token itself gets replaced.
+        //
+        // Crucially, the token we hand to `PathToken::parse` keeps any
+        // leading `/` it had (so `#/ho` parses as absolute path `/ho`,
+        // matching pi's behavior of treating the parent of `/ho` as the
+        // filesystem root). Without this, `#/ho` would degenerate into
+        // a bare word search of the working dir.
+        let (start, _token, candidates) = if self.input.starts_with('#') {
+            // Token begins right after the `#` (skip leading whitespace).
+            let after_hash = &self.input[1..];
+            let leading_ws = after_hash.len() - after_hash.trim_start().len();
+            let token_start = 1 + leading_ws;
+            let token_end = self.cursor_pos.min(self.input.len());
+            if token_end <= token_start {
+                self.reset_path_completion();
+                return false;
+            }
+            // The slice we hand to the parser MUST include any leading
+            // separator that was on the user-typed text after `#`, so that
+            // e.g. `#/ho` parses as the absolute path token `/ho`. We
+            // trim trailing whitespace from the parser slice (the apply
+            // step will preserve any trailing whitespace in the input
+            // since the apply range is `start..cursor`, not
+            // `start..token_end`).
+            let parser_slice = self.input[token_start..token_end].trim_end();
+            let Some(parsed) = path_completion::PathToken::parse(parser_slice) else {
+                self.reset_path_completion();
+                return false;
+            };
+            let candidates = path_completion::list_candidates(&parsed, &base);
+            (token_start, parsed, candidates)
+        } else {
+            // Branch 2: delimiter-bearing token under the cursor.
+            let Some((start, _token, candidates)) =
+                path_completion::candidates_at_cursor(&self.input, self.cursor_pos, &base)
+            else {
+                self.reset_path_completion();
+                return false;
+            };
+            (start, _token, candidates)
         };
+
         if candidates.is_empty() {
             self.reset_path_completion();
             return false;

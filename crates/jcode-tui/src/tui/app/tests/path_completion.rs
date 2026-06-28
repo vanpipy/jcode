@@ -157,24 +157,25 @@ fn reset_tab_completion_also_clears_path_state() {
 }
 
 #[test]
-fn tab_with_bare_token_triggers_path_popup() {
-    // pi-mono behavior: Tab on a bare word (no `/`, no `~`) lists entries of
-    // the working directory whose name starts with that word. This is what
-    // makes Tab useful for ordinary "Pro → Project/" completions.
-    let tmp = unique_tmp_dir("bare_token");
+fn hash_prefix_enters_path_mode_and_lists_working_dir() {
+    // The recommended entry into path-completion mode is the `#` prefix,
+    // analogous to how `/` enters command-completion mode. Typing `#` and
+    // then any non-empty text should trigger path completion on Tab, with
+    // the `#` itself preserved verbatim in the input.
+    let tmp = unique_tmp_dir("hash_mode");
     fs::create_dir(tmp.join("Project")).unwrap();
     fs::create_dir(tmp.join("Projectile")).unwrap();
     fs::write(tmp.join("article.txt"), b"").unwrap();
 
     let mut app = create_test_app();
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
-    app.input = "look at Pro".to_string();
+    app.input = "#Pro".to_string();
     app.cursor_pos = app.input.len();
 
     handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
     assert!(
         app.has_path_completion(),
-        "Tab on a bare word must trigger the path popup"
+        "Tab on `#Pro` must trigger the path popup in hash-mode"
     );
     let labels: Vec<String> = app
         .path_completion_suggestions()
@@ -183,11 +184,134 @@ fn tab_with_bare_token_triggers_path_popup() {
         .collect();
     assert!(
         labels.iter().any(|l| l == "Project/"),
-        "bare-token Tab should list Pro* entries, got {:?}",
+        "hash-mode Tab should list Pro* entries, got {:?}",
         labels
     );
     assert!(labels.iter().any(|l| l == "Projectile/"));
     assert!(!labels.iter().any(|l| l.starts_with("article")));
+    // The `#` marker must be preserved in the input; the apply step only
+    // replaces the path portion after the `#`.
+    assert!(
+        app.input.starts_with('#'),
+        "the `#` marker must be preserved across apply, got: {:?}",
+        app.input
+    );
+    let first_value = app.path_completion_suggestions()[0].0.clone();
+    assert!(
+        app.input.contains(&first_value),
+        "input `{}` should contain first candidate `{}`",
+        app.input,
+        first_value
+    );
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn hash_mode_with_absolute_path_works() {
+    // `#/ho` should search from the filesystem root (matching pi's
+    // dirname("/ho") === "/"), with the `#` preserved.
+    let mut app = create_test_app();
+    app.input = "#/ho".to_string();
+    app.cursor_pos = app.input.len();
+
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    assert!(
+        app.has_path_completion(),
+        "Tab on `#/ho` must trigger the path popup"
+    );
+    // The popup label is just the basename; the applied value preserves
+    // the leading `/`. We check the input that the apply step produced.
+    assert!(
+        app.input.starts_with("#/"),
+        "the `#` must be preserved, got: {:?}",
+        app.input
+    );
+    let applied = &app.input[1..]; // strip `#`
+    assert!(
+        applied.starts_with('/'),
+        "applied value (after `#`) should be absolute, got: {:?}",
+        applied
+    );
+    assert!(
+        applied.contains("home") || applied.contains("host"),
+        "expected an entry starting with `ho`, got: {:?}",
+        applied
+    );
+}
+
+#[test]
+fn hash_mode_just_marker_does_nothing() {
+    // `#` alone (no path token yet) should NOT trigger the popup. The user
+    // hasn't typed a path, so there's nothing to complete.
+    let tmp = unique_tmp_dir("hash_only");
+    fs::create_dir(tmp.join("X")).unwrap();
+    let mut app = create_test_app();
+    app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
+    app.input = "#".to_string();
+    app.cursor_pos = 1;
+
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    assert!(
+        !app.has_path_completion(),
+        "Tab on bare `#` (no path token) must not open the popup"
+    );
+    // Input unchanged.
+    assert_eq!(app.input, "#");
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn bare_word_tab_no_longer_triggers_path_popup() {
+    // With the new explicit-`#`-mode design, a bare word with no path
+    // separator (e.g. `Pro`) MUST NOT trigger the path popup on Tab. Tab
+    // falls through to command completion, which finds nothing for `Pro`
+    // (no command starts with `Pro`), so the popup state stays clean.
+    let tmp = unique_tmp_dir("bare_no_trigger");
+    fs::create_dir(tmp.join("Project")).unwrap();
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
+    app.input = "look at Pro".to_string();
+    app.cursor_pos = app.input.len();
+
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    assert!(
+        !app.has_path_completion(),
+        "bare-word Tab (no `#`, no separator) must NOT trigger path popup"
+    );
+    // The input should be untouched — no auto-apply.
+    assert_eq!(
+        app.input, "look at Pro",
+        "bare-word Tab must not mutate the input"
+    );
+
+    fs::remove_dir_all(&tmp).ok();
+}
+
+#[test]
+fn delimiter_token_tab_still_triggers_path_popup() {
+    // The fallback for users who already started typing a path WITHOUT the
+    // `#` marker: any token containing a path separator (`./`, `~/`, `/`,
+    // or a relative like `foo/bar`) still triggers path completion. This
+    // keeps the previous behavior for muscle-memory users.
+    let tmp = unique_tmp_dir("delim");
+    fs::create_dir(tmp.join("Project")).unwrap();
+    fs::create_dir(tmp.join("Projectile")).unwrap();
+
+    let mut app = create_test_app();
+    app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
+    app.input = "./Pro".to_string();
+    app.cursor_pos = app.input.len();
+
+    handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
+    assert!(
+        app.has_path_completion(),
+        "Tab on `./Pro` (delimiter-bearing token) must trigger the popup"
+    );
+    let first_value = app.path_completion_suggestions()[0].0.clone();
+    assert!(first_value.starts_with("Pro"));
 
     fs::remove_dir_all(&tmp).ok();
 }
@@ -215,9 +339,12 @@ fn tab_on_slash_command_root_falls_through_to_command_completion() {
 }
 
 #[test]
-fn tab_on_slash_command_with_args_still_triggers_path_popup() {
+fn tab_on_slash_command_argument_does_not_trigger_bare_word_path() {
     // Once the slash command has been completed and a space added, Tab on
-    // the argument should behave like a regular path-completion trigger.
+    // a *bare word* argument (no `#` prefix, no path separator) must NOT
+    // trigger the path popup. The user should either prefix the argument
+    // with `#` (e.g. `/model #Pro`) or include a path separator (e.g.
+    // `/model ./Pro`).
     let tmp = unique_tmp_dir("slash_arg");
     fs::create_dir(tmp.join("Project")).unwrap();
 
@@ -228,9 +355,12 @@ fn tab_on_slash_command_with_args_still_triggers_path_popup() {
 
     handle(&mut app, KeyCode::Tab, KeyModifiers::empty());
     assert!(
-        app.has_path_completion(),
-        "Tab on the argument of a slash command must open the path popup"
+        !app.has_path_completion(),
+        "Tab on a bare-word slash-command argument must NOT open the path popup"
     );
+    // (The command-completion fallback may rewrite `/model Pro` to a known
+    // command like `/model <something>` — we only assert that path mode
+    // did NOT fire.)
 
     fs::remove_dir_all(&tmp).ok();
 }
@@ -274,6 +404,8 @@ fn path_popup_actually_renders_into_terminal() {
     // Visual regression guard: the popup state must show up in the rendered
     // frame, not just in the App's internal state. This is the assertion that
     // would have caught any "state updates but UI doesn't redraw" bug.
+    //
+    // Uses `#Pro` to enter path mode explicitly (the recommended way).
     let _lock = scroll_render_test_lock();
     let tmp = unique_tmp_dir("render");
     fs::create_dir(tmp.join("Project")).unwrap();
@@ -281,7 +413,7 @@ fn path_popup_actually_renders_into_terminal() {
 
     let mut app = create_test_app();
     app.session.working_dir = Some(tmp.to_string_lossy().into_owned());
-    app.input = "Pro".to_string();
+    app.input = "#Pro".to_string();
     app.cursor_pos = app.input.len();
 
     // Trigger the popup.
