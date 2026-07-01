@@ -14,6 +14,12 @@ primary actions), pool it into a coarse block grid, then ask two questions:
 Reward exactly one dominant region that holds a large share of salience;
 penalize either nothing salient (no focal point) or many competing regions
 (visual noise spread evenly).
+
+Scenario-aware: the `empty` scenario is a deliberate empty state. With almost
+no content, total salience is tiny, so demanding that the focal region hold
+half of ALL salience is unfair: the OS status bar and header glyphs alone
+dilute it. In empty mode a single focal affordance is the whole job, so the
+concentration target is relaxed and the single-focal-point term dominates.
 """
 
 from __future__ import annotations
@@ -27,7 +33,15 @@ from reward.types import CategoryScore, make_unavailable
 
 NAME = "visual_hierarchy"
 CATEGORY = "C"
-WEIGHT = 0.0595
+WEIGHT = 0.04
+
+# Scenarios that render a deliberate empty state (no transcript yet).
+EMPTY_SCENARIOS = {"empty"}
+# Concentration targets: a busy transcript should have a clearly dominant
+# region (>=50% of salience); an empty state only needs a modestly dominant
+# affordance (>=30%) because chrome glyphs dilute the tiny salience budget.
+_CONC_TARGET = 0.5
+_CONC_TARGET_EMPTY = 0.3
 
 # Max possible RGB euclidean distance, used to normalize contrast salience.
 _MAX_RGB_DIST = math.sqrt(3 * 255.0 * 255.0)
@@ -112,16 +126,23 @@ def score(ctx: Context) -> CategoryScore:
 
     # One region is ideal; each extra competing region decays the reward.
     focal_score = 100.0 * math.exp(-0.35 * (focal_count - 1)) if focal_count >= 1 else 0.0
-    # A clearly dominant region holds >= ~50% of all salience.
-    conc_score = 100.0 * min(1.0, concentration / 0.5)
+    is_empty = ctx.scenario in EMPTY_SCENARIOS
+    conc_target = _CONC_TARGET_EMPTY if is_empty else _CONC_TARGET
+    conc_score = 100.0 * min(1.0, concentration / conc_target)
 
-    value = 0.55 * focal_score + 0.45 * conc_score
+    if is_empty:
+        # Empty state: "is there ONE obvious thing to do?" dominates.
+        value = 0.7 * focal_score + 0.3 * conc_score
+    else:
+        value = 0.55 * focal_score + 0.45 * conc_score
     value = max(0.0, min(100.0, value))
 
     return CategoryScore(
         name=NAME, category=CATEGORY, weight=WEIGHT, value=round(value, 2),
         evidence={
+            "mode": "empty_state" if is_empty else "transcript",
             "focal_count": int(focal_count),
             "salience_concentration": round(float(concentration), 4),
+            "concentration_target": conc_target,
         },
     )
