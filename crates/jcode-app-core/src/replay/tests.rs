@@ -254,6 +254,7 @@ fn test_export_timeline_includes_persisted_swarm_replay_events() {
                     output_tail: None,
                     report_back_to_session_id: None,
                     todo_progress: None,
+                    todo_items: Vec::new(),
                 }],
             },
         },
@@ -324,6 +325,7 @@ fn test_timeline_to_replay_events_converts_swarm_replay_events() {
                     output_tail: None,
                     report_back_to_session_id: None,
                     todo_progress: None,
+                    todo_items: Vec::new(),
                 }],
             },
         },
@@ -391,6 +393,7 @@ fn test_load_swarm_sessions_discovers_related_sessions() {
         output_tail: None,
         report_back_to_session_id: None,
         todo_progress: None,
+        todo_items: Vec::new(),
     }]);
     seed.save().unwrap();
 
