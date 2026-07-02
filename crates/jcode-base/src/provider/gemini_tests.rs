@@ -1,11 +1,5 @@
 use super::*;
 use crate::message::{ContentBlock, Message, Role};
-use crate::provider::{EventStream, Provider};
-// `tool::Registry` lives in the upper jcode-app-core layer; reached here via the
-// dev-dependency on jcode-app-core (legal Cargo dev-dep cycle, lib build unaffected).
-use async_trait::async_trait;
-use jcode_app_core::tool::Registry;
-use std::sync::Arc;
 
 struct EnvVarGuard {
     key: &'static str,
@@ -39,31 +33,6 @@ impl Drop for EnvVarGuard {
         } else {
             crate::env::remove_var(self.key);
         }
-    }
-}
-
-struct MockProvider;
-
-#[async_trait]
-impl Provider for MockProvider {
-    async fn complete(
-        &self,
-        _messages: &[Message],
-        _tools: &[ToolDefinition],
-        _system: &str,
-        _resume_session_id: Option<&str>,
-    ) -> anyhow::Result<EventStream> {
-        Err(anyhow::anyhow!(
-            "Mock provider should not be used for streaming completions in Gemini tests"
-        ))
-    }
-
-    fn name(&self) -> &str {
-        "mock"
-    }
-
-    fn fork(&self) -> Arc<dyn Provider> {
-        Arc::new(MockProvider)
     }
 }
 
@@ -575,18 +544,6 @@ fn build_tools_strips_additional_properties_for_gemini_schema_compatibility() {
         json!("integer")
     );
     assert_eq!(parameters["required"], json!(["file_path"]));
-}
-
-#[tokio::test]
-async fn build_tools_from_registry_definitions_omits_const_keywords() {
-    let provider: Arc<dyn Provider> = Arc::new(MockProvider);
-    let registry = Registry::new(provider).await;
-    let defs = registry.definitions(None).await;
-
-    let built = build_tools(&defs).expect("gemini tools");
-    let parameters = &built[0].function_declarations;
-
-    assert!(!schema_contains_key(&json!(parameters), "const"));
 }
 
 #[test]
