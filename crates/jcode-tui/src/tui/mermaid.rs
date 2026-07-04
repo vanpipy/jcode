@@ -13,7 +13,8 @@ pub use jcode_tui_mermaid::{
     error_to_lines, estimate_image_height, evict_old_cache, get_active_diagrams, get_cached_path,
     get_cached_png, get_font_size, image_protocol_available, image_widget_placeholder_markdown,
     init_picker, inline_fit_geometry, inline_fit_readiness, inline_image_dims, inline_image_id,
-    inline_image_is_materialized, inline_image_placeholder_lines, invalidate_render_state,
+    inline_image_is_materialized, inline_image_placeholder_lines, inline_transcript_aspect_goal,
+    inline_transcript_aspect_goal_with_font, invalidate_render_state,
     is_mermaid_lang, is_video_export_mode, materialize_inline_image,
     materialize_inline_image_by_id, normalize_aspect_ratio, parse_image_placeholder,
     parse_inline_image_placeholder, preferred_aspect_ratio_bucket, prewarm_inline_fit_state,
@@ -24,7 +25,8 @@ pub use jcode_tui_mermaid::{
     render_mermaid_deferred_with_stream_scope, render_mermaid_sized, render_mermaid_untracked,
     reset_debug_stats, restore_active_diagrams, result_to_content, result_to_lines, set_log_hooks,
     set_memory_snapshot_hook, set_render_completed_hook, set_streaming_preview_diagram,
-    set_video_export_mode, snapshot_active_diagrams, with_preferred_aspect_ratio,
+    set_video_export_mode, snapshot_active_diagrams, transcript_preferred_aspect_ratio,
+    transcript_preferred_aspect_ratio_with_font, with_preferred_aspect_ratio,
     write_video_export_marker,
 };
 pub use jcode_tui_mermaid::{ImageScrollBenchmark, cache_stat_syscalls};
