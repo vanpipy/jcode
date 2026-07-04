@@ -260,6 +260,7 @@ pub use viewport_render::{
 };
 pub use widget_render::{render_image_widget, render_image_widget_fit, render_image_widget_scale};
 
+use cache_render::LAYOUT_CACHE_MAX;
 #[cfg(test)]
 use cache_render::calculate_render_size;
 use cache_render::{
@@ -267,7 +268,6 @@ use cache_render::{
     bump_deferred_render_epoch, clear_layout_cache, get_cached_diagram,
     get_cached_diagram_in_memory, layout_cache_usage,
 };
-use cache_render::LAYOUT_CACHE_MAX;
 use viewport_render::clear_image_area;
 use widget_render::{BORDER_WIDTH, draw_left_border, render_stateful_image_safe};
 

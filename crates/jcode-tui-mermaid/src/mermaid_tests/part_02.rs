@@ -229,7 +229,7 @@ fn bounded_bookkeeping_insert_caps_map_growth() {
 #[test]
 fn inline_fit_geometry_and_marker_roundtrip() {
     use ratatui::style::Style;
-    use ratatui::text::{Line, Span};
+    use ratatui::text::Span;
 
     // Wide image at 80 cells: width-bound, well under the cap.
     let (rows, cols) = crate::inline_fit_geometry(1600, 400, 80, crate::INLINE_DIAGRAM_MAX_ROWS);

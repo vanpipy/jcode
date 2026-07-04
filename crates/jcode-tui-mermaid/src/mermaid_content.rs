@@ -158,12 +158,7 @@ pub fn transcript_preferred_aspect_ratio(
 /// preserving aspect ratio. This is the single source of placeholder geometry
 /// for the inline-fit pipeline: prepare-time placeholders and the draw-time
 /// scale use the same math so borders and labels hug the rendered pixels.
-pub fn inline_fit_geometry(
-    width: u32,
-    height: u32,
-    chat_width: u16,
-    cap_rows: u16,
-) -> (u16, u16) {
+pub fn inline_fit_geometry(width: u32, height: u32, chat_width: u16, cap_rows: u16) -> (u16, u16) {
     if width == 0 || height == 0 {
         return (INLINE_FIT_MIN_ROWS, chat_width.min(2));
     }
@@ -191,7 +186,10 @@ pub fn inline_fit_geometry(
         (w.min(avail_px).max(1), cap_px)
     };
 
-    let rows = final_h_px.max(1).div_ceil(cell_h).max(INLINE_FIT_MIN_ROWS as u32) as u16;
+    let rows = final_h_px
+        .max(1)
+        .div_ceil(cell_h)
+        .max(INLINE_FIT_MIN_ROWS as u32) as u16;
     let cols = (final_w_px.max(1).div_ceil(cell_w) as u16)
         .saturating_add(2)
         .min(chat_width);

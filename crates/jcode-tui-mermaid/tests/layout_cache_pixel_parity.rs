@@ -29,6 +29,8 @@
 //! `#[ignore]`-d: run explicitly with
 //! `cargo test -p jcode-tui-mermaid --test layout_cache_pixel_parity -- --ignored --nocapture`
 
+#![cfg(feature = "renderer")]
+
 use jcode_tui_mermaid::{RenderResult, debug_stats, render_mermaid_untracked};
 
 /// Render and return (hash, png path, png bytes), panicking on render errors.
@@ -141,8 +143,8 @@ fn layout_cache_hit_renders_pixel_identical_png_across_diagram_kinds_and_widths(
                 // is nondeterministic, which is a finding, not a parity bug.
                 let img_a = decode_rgba(&label, &bytes_a);
                 let img_b = decode_rgba(&label, &bytes_b);
-                pixel_equal = img_a.dimensions() == img_b.dimensions()
-                    && img_a.as_raw() == img_b.as_raw();
+                pixel_equal =
+                    img_a.dimensions() == img_b.dimensions() && img_a.as_raw() == img_b.as_raw();
                 assert!(
                     pixel_equal,
                     "{label}: PIXEL PARITY FAILURE: cached-layout render differs from \

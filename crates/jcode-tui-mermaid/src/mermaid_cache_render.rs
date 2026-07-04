@@ -362,7 +362,10 @@ fn serialize_fingerprint<T: serde::Serialize>(value: &T) -> u64 {
 /// Build the effective `LayoutConfig` for a diagram of the given complexity.
 /// Single source of truth for the render path and the layout cache key.
 #[cfg(feature = "renderer")]
-pub(super) fn build_layout_config(complexity: usize, render_profile: RenderProfile) -> LayoutConfig {
+pub(super) fn build_layout_config(
+    complexity: usize,
+    render_profile: RenderProfile,
+) -> LayoutConfig {
     // Adaptive spacing based on complexity
     let spacing_factor = if complexity > 30 { 1.2 } else { 1.0 };
     LayoutConfig {
@@ -1073,8 +1076,7 @@ fn render_mermaid_sized_internal(
             // so a PNG-cache miss caused by a width-bucket-crossing resize can
             // reuse the computed layout and only re-rasterize.
             let cache_key = layout_cache_key(hash, &theme, &layout_config, render_profile);
-            let (layout, parse_ms, layout_ms) = if let Some(layout) = layout_cache_get(&cache_key)
-            {
+            let (layout, parse_ms, layout_ms) = if let Some(layout) = layout_cache_get(&cache_key) {
                 (layout, 0.0, 0.0)
             } else {
                 let parse_start = Instant::now();

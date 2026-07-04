@@ -14,12 +14,19 @@
 //! `#[ignore]`-d: run explicitly with
 //! `cargo test -p jcode-tui-mermaid --test layout_cache_memory_probe -- --ignored --nocapture`
 
+#![cfg(feature = "renderer")]
+
 /// VmRSS from /proc/self/status, in bytes (Linux only).
 fn vm_rss_bytes() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let kb = rest.trim().trim_end_matches("kB").trim().parse::<u64>().ok()?;
+            let kb = rest
+                .trim()
+                .trim_end_matches("kB")
+                .trim()
+                .parse::<u64>()
+                .ok()?;
             return Some(kb * 1024);
         }
     }
@@ -128,7 +135,10 @@ fn layout_cache_stays_bounded_under_50_distinct_renders() {
         "layout cache approx bytes {} exceed the ~2.5MB worst-case bound",
         stats.layout_cache_approx_bytes
     );
-    assert_eq!(memory.layout_cache_approx_bytes, stats.layout_cache_approx_bytes);
+    assert_eq!(
+        memory.layout_cache_approx_bytes,
+        stats.layout_cache_approx_bytes
+    );
     assert!(
         stats.layout_cache_approx_bytes > 0,
         "cache should hold real layouts after 50 renders"
