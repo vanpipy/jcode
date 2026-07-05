@@ -81,15 +81,6 @@ impl ImageExpandLevel {
             ImageExpandLevel::Full => 200,
         }
     }
-
-    /// 0-based filled-dot count for the click-progress badge (Fit shows none).
-    fn filled_dots(self) -> usize {
-        match self {
-            ImageExpandLevel::Fit => 0,
-            ImageExpandLevel::Large => 1,
-            ImageExpandLevel::Full => 2,
-        }
-    }
 }
 
 /// Resolve the expand level for an image id. Implemented by `App` so the lookup
@@ -608,21 +599,16 @@ fn fit_rows(width: u32, height: u32, chat_width: u16, viewport_height: u16) -> u
 }
 
 /// Build the dim label line shown above an inline image, e.g.
-/// `  🖼 screenshot.png  1920×1080`, with a trailing show/hide badge
+/// `  screenshot.png  1920×1080`, with a trailing show/hide badge
 /// (`[Alt] [⇧] [I] hide` / `[Alt] [⇧] [I] show image`) so the toggle is
-/// discoverable right where the image renders, plus a clickable `expand` badge
-/// that cycles the per-image size. The expand badge renders a three-dot
-/// progress indicator (`○○` -> `●○`) reflecting the current level so the
-/// badge reads as a two-click expand/reset toggle.
-/// Click/cursor icon that prefixes the clickable expand badge. Doubles as the
-/// anchor cell for badge hit detection (see `expand_badge_start_col`), so any
-/// change here must stay in sync with that scanner.
-pub(crate) const EXPAND_BADGE_CLICK_ICON: &str = "🖱";
-
+/// discoverable right where the image renders. The line is kept deliberately
+/// short so it fits on one row; there is no visible expand badge, but clicking
+/// the rendered image body still cycles the per-image size
+/// (see `inline_image_body_target_from_screen`).
 pub(crate) fn image_label_line(
     item: &InlineImageItem,
     images_visible: bool,
-    level: ImageExpandLevel,
+    _level: ImageExpandLevel,
 ) -> Line<'static> {
     let dims = format!("{}×{}", item.width, item.height);
     let label = if item.label.is_empty() {
@@ -632,7 +618,7 @@ pub(crate) fn image_label_line(
     };
     let dim = Style::default().add_modifier(Modifier::DIM);
     let mut spans = vec![
-        Span::styled("  🖼 ", dim),
+        Span::styled("  ", dim),
         Span::styled(label, dim),
         Span::raw("  "),
         Span::styled(super::viewport::copy_badge_alt_badge(), dim),
@@ -640,16 +626,6 @@ pub(crate) fn image_label_line(
     ];
     if images_visible {
         spans.push(Span::styled("hide", dim));
-        // Clickable expand badge: a click/cursor icon signals the badge is
-        // clickable, the dots show how far through the size cycle we are, then a
-        // verb hints the next click's effect. The icon is also the first cell of
-        // the badge hit-region (see `expand_badge_start_col`).
-        spans.push(Span::raw("   "));
-        spans.push(Span::styled(EXPAND_BADGE_CLICK_ICON, dim));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(expand_dots(level), dim));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(expand_verb(level), dim));
     } else {
         spans.push(Span::styled(
             "show image",
@@ -657,26 +633,6 @@ pub(crate) fn image_label_line(
         ));
     }
     Line::from(spans)
-}
-
-/// Two-dot progress indicator for the expand badge, filled to the current
-/// level (`○○` at Fit, `●○` at Large, `●●` at Full).
-fn expand_dots(level: ImageExpandLevel) -> String {
-    const SLOTS: usize = 2;
-    let filled = level.filled_dots().min(SLOTS);
-    let mut out = String::with_capacity(SLOTS * 3);
-    for slot in 0..SLOTS {
-        out.push(if slot < filled { '●' } else { '○' });
-    }
-    out
-}
-
-/// Verb describing what the next expand-badge click does.
-fn expand_verb(level: ImageExpandLevel) -> &'static str {
-    match level {
-        ImageExpandLevel::Fit | ImageExpandLevel::Large => "expand",
-        ImageExpandLevel::Full => "reset",
-    }
 }
 
 /// Lines for images anchored at a transcript message: per image, a leading
@@ -992,21 +948,6 @@ mod tests {
     }
 
     #[test]
-    fn expand_badge_dots_track_level() {
-        // Fit shows no filled dots; each expand level fills one more.
-        assert_eq!(expand_dots(ImageExpandLevel::Fit), "○○");
-        assert_eq!(expand_dots(ImageExpandLevel::Large), "●○");
-        assert_eq!(expand_dots(ImageExpandLevel::Full), "●●");
-    }
-
-    #[test]
-    fn expand_badge_verb_resets_at_max() {
-        assert_eq!(expand_verb(ImageExpandLevel::Fit), "expand");
-        assert_eq!(expand_verb(ImageExpandLevel::Large), "expand");
-        assert_eq!(expand_verb(ImageExpandLevel::Full), "reset");
-    }
-
-    #[test]
     fn expand_level_cycle_visits_every_level_and_wraps() {
         assert_eq!(ImageExpandLevel::Fit.next(), ImageExpandLevel::Large);
         assert_eq!(ImageExpandLevel::Large.next(), ImageExpandLevel::Full);
@@ -1028,11 +969,14 @@ mod tests {
     }
 
     #[test]
-    fn visible_label_line_shows_expand_badge() {
+    fn visible_label_line_stays_single_purpose_without_expand_badge() {
+        // The label must stay a short single line: no expand badge, no dots.
         let line = image_label_line(&item(600, 400), true, ImageExpandLevel::Fit);
         let text = jcode_tui_render::line_plain_text(&line);
-        assert!(text.contains("expand"), "expand badge missing: {text:?}");
-        assert!(text.contains("○○"), "expand dots missing: {text:?}");
+        assert!(
+            !text.contains("expand") && !text.contains('○') && !text.contains('●'),
+            "label line must not carry an expand badge: {text:?}"
+        );
     }
 
     #[test]
