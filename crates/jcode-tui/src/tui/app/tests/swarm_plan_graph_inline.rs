@@ -100,6 +100,14 @@ impl DiagramModeOverrideGuard {
         ));
         Self { prev }
     }
+
+    fn margin() -> Self {
+        let prev = crate::tui::markdown::get_diagram_mode_override();
+        crate::tui::markdown::set_diagram_mode_override(Some(
+            crate::config::DiagramDisplayMode::Margin,
+        ));
+        Self { prev }
+    }
 }
 
 impl Drop for DiagramModeOverrideGuard {
@@ -1143,6 +1151,267 @@ fn test_disconnected_ctrl_l_clear_leaves_stale_active_diagram_and_swarm_plan_sta
         &mut app,
         stale_hash,
         "disconnected Ctrl+L",
+    );
+
+    crate::tui::mermaid::clear_active_diagrams();
+}
+
+// ---------------------------------------------------------------------------
+// wiring-audit.margin-streaming-preview-verify.margin-stale-entries: Margin
+// mode reads the SAME process-global ACTIVE_DIAGRAMS registry as the pinned
+// pane, but through a different consumer: `info_widget_data` (tui_state.rs
+// ~1456) copies `get_active_diagrams()` into `InfoWidgetData.diagrams` only
+// when `self.diagram_mode == DiagramDisplayMode::Margin`, and the margin
+// widget renders `data.diagrams[0]` only (info_widget.rs ~1361). The tests
+// below pin (a) the mode gate, (b) that plan-graph version bumps accumulate
+// the same stale entries in the Margin list as in the pinned pane, and
+// (c) Margin-mode selection semantics: `diagram_index` is force-reset and
+// keyboard cycling is unreachable, so the widget always shows the newest
+// diagram regardless of any previously parked selection.
+// ---------------------------------------------------------------------------
+
+/// Mode gate: `info_widget_data().diagrams` is populated from the global
+/// registry ONLY in Margin mode (tui_state.rs:1456-1460); Pinned mode (which
+/// uses the dedicated pane) gets an empty list.
+#[test]
+fn test_info_widget_diagram_list_populated_only_in_margin_mode() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+
+    crate::tui::mermaid::clear_active_diagrams();
+    crate::tui::mermaid::register_active_diagram(0xA1, 100, 80, None);
+    crate::tui::mermaid::register_active_diagram(0xA2, 120, 90, None);
+
+    app.diagram_mode = crate::config::DiagramDisplayMode::Margin;
+    let margin_data = crate::tui::TuiState::info_widget_data(&app);
+    assert_eq!(
+        margin_data.diagrams.iter().map(|d| d.hash).collect::<Vec<_>>(),
+        vec![0xA2, 0xA1],
+        "Margin mode copies the registry (newest-first) into the info widget"
+    );
+
+    app.diagram_mode = crate::config::DiagramDisplayMode::Pinned;
+    let pinned_data = crate::tui::TuiState::info_widget_data(&app);
+    assert!(
+        pinned_data.diagrams.is_empty(),
+        "Pinned mode must NOT feed the margin info widget (dedicated pane instead)"
+    );
+
+    crate::tui::mermaid::clear_active_diagrams();
+}
+
+/// Stale accumulation reproduces in Margin mode: an in-place plan-graph
+/// version bump with changed content registers a second content hash and the
+/// Margin info-widget list keeps BOTH versions (nothing unregisters the old
+/// one). The margin widget itself renders `diagrams[0]`, so the panel shows
+/// the fresh version, but the stale entry inflates the list exactly as in
+/// the pinned pane (see test_upsert_in_place_plan_bump_accumulates_stale_active_diagrams).
+#[test]
+fn test_margin_mode_plan_bump_accumulates_stale_diagram_in_info_widget_list() {
+    let _render_lock = scroll_render_test_lock();
+    let _mode_guard = DiagramModeOverrideGuard::margin();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::Margin;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    crate::tui::mermaid::clear_active_diagrams();
+
+    // v1: task running. Render through the real swarm-message markdown path;
+    // in Margin mode `mermaid_should_register_active()` is true (only None
+    // opts out, jcode-tui-markdown/src/lib.rs mermaid_should_register_active),
+    // so the diagram registers like a transcript render would.
+    app.handle_server_event(
+        swarm_plan_event(1, vec![swarm_plan_graph_item("haiku-1", "write a haiku")]),
+        &mut remote,
+    );
+    let v1_msg = app
+        .display_messages()
+        .iter()
+        .rev()
+        .find(|m| m.role == "swarm")
+        .expect("plan graph message")
+        .clone();
+    let _ =
+        crate::tui::ui::render_swarm_message(&v1_msg, 80, crate::config::DiffDisplayMode::Inline);
+    let v1_list = crate::tui::TuiState::info_widget_data(&app).diagrams;
+    assert_eq!(
+        v1_list.len(),
+        1,
+        "Margin mode: first plan render lands in the info-widget diagram list"
+    );
+    let v1_hash = v1_list[0].hash;
+
+    // v2: status flip changes the graph content; the transcript message is
+    // replaced in place, but the registry gains a second entry.
+    let mut done = swarm_plan_graph_item("haiku-1", "write a haiku");
+    done.status = "completed".to_string();
+    app.handle_server_event(swarm_plan_event(2, vec![done.clone()]), &mut remote);
+    assert_eq!(
+        plan_graph_titles(&app),
+        vec!["Plan graph · v2".to_string()],
+        "upsert keeps a single transcript plan-graph message"
+    );
+    let v2_msg = app
+        .display_messages()
+        .iter()
+        .rev()
+        .find(|m| m.role == "swarm")
+        .expect("plan graph message")
+        .clone();
+    assert_ne!(v1_msg.content, v2_msg.content, "status flip changes graph source");
+    let _ =
+        crate::tui::ui::render_swarm_message(&v2_msg, 80, crate::config::DiffDisplayMode::Inline);
+
+    let diagrams = crate::tui::TuiState::info_widget_data(&app).diagrams;
+    assert_eq!(
+        diagrams.len(),
+        2,
+        "STALE ACCUMULATION CONFIRMED in Margin mode: the info-widget list \
+         holds both plan-graph versions after an in-place bump"
+    );
+    assert_ne!(
+        diagrams[0].hash, v1_hash,
+        "newest-first: index 0 is the fresh v2 diagram (the one the margin \
+         widget renders, info_widget.rs render_diagrams_widget)"
+    );
+    assert_eq!(
+        diagrams[1].hash, v1_hash,
+        "the replaced v1 diagram is still listed (stale)"
+    );
+
+    // Refinement (same as pinned): a version-only bump with identical items
+    // produces identical mermaid source and does NOT add a third entry.
+    app.handle_server_event(swarm_plan_event(3, vec![done]), &mut remote);
+    let v3_msg = app
+        .display_messages()
+        .iter()
+        .rev()
+        .find(|m| m.role == "swarm")
+        .expect("plan graph message")
+        .clone();
+    assert_eq!(
+        v2_msg.content, v3_msg.content,
+        "version-only bump keeps identical graph content"
+    );
+    let _ =
+        crate::tui::ui::render_swarm_message(&v3_msg, 80, crate::config::DiffDisplayMode::Inline);
+    assert_eq!(
+        crate::tui::TuiState::info_widget_data(&app).diagrams.len(),
+        2,
+        "accumulation is per distinct graph content, not per version number"
+    );
+
+    crate::tui::mermaid::clear_active_diagrams();
+}
+
+/// Margin-mode selection semantics: there is no per-diagram selection at all.
+/// `diagram_available()` requires Pinned mode (navigation.rs:336-340), so
+/// Ctrl+arrow cycling is unreachable; `normalize_diagram_state` force-resets
+/// `diagram_index` to 0 in any non-Pinned mode (navigation.rs:342-349); and
+/// the margin widget always renders `diagrams[0]` (info_widget.rs:1361). So
+/// after the list changes, the "selection" is always the newest diagram:
+/// a stale index can never be pointed at a stale entry in Margin mode.
+#[test]
+fn test_margin_mode_has_no_diagram_selection_and_always_shows_newest() {
+    let _render_lock = scroll_render_test_lock();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::Margin;
+    app.diagram_pane_enabled = true;
+
+    crate::tui::mermaid::clear_active_diagrams();
+    crate::tui::mermaid::register_active_diagram(0xB1, 100, 80, None);
+    crate::tui::mermaid::register_active_diagram(0xB2, 100, 80, None);
+    crate::tui::mermaid::register_active_diagram(0xB3, 100, 80, None);
+
+    // Cycling is unreachable: diagram_available() is Pinned-only, so the
+    // Ctrl-key handler refuses the cycle keys even with diagrams present.
+    assert!(
+        !app.diagram_available(),
+        "Margin mode reports no cyclable diagram pane"
+    );
+    app.diagram_focus = true; // even with focus somehow set
+    assert!(
+        !app.handle_diagram_ctrl_key(KeyCode::Left, app.diagram_available()),
+        "Ctrl+Left does not cycle in Margin mode"
+    );
+    assert!(
+        !app.handle_diagram_ctrl_key(KeyCode::Right, app.diagram_available()),
+        "Ctrl+Right does not cycle in Margin mode"
+    );
+
+    // A parked/stale index from a previous Pinned session is force-reset by
+    // normalize_diagram_state's non-Pinned branch, so it can never select a
+    // stale entry after the list changes.
+    app.diagram_index = 2;
+    app.diagram_scroll_x = 5;
+    app.diagram_scroll_y = 7;
+    app.normalize_diagram_state();
+    assert_eq!(app.diagram_index, 0, "non-Pinned normalize resets the index");
+    assert!(!app.diagram_focus, "non-Pinned normalize drops diagram focus");
+    assert_eq!(app.diagram_scroll_x, 0);
+    assert_eq!(app.diagram_scroll_y, 0);
+    assert_eq!(
+        app.last_visible_diagram_hash, None,
+        "no visible-diagram anchor is tracked in Margin mode"
+    );
+
+    // The widget input is newest-first, and the margin renderer draws only
+    // element 0, so a new registration immediately becomes the shown diagram.
+    let before = crate::tui::TuiState::info_widget_data(&app).diagrams;
+    assert_eq!(before[0].hash, 0xB3, "newest diagram is the rendered one");
+    crate::tui::mermaid::register_active_diagram(0xB4, 100, 80, None);
+    let after = crate::tui::TuiState::info_widget_data(&app).diagrams;
+    assert_eq!(
+        after.iter().map(|d| d.hash).collect::<Vec<_>>(),
+        vec![0xB4, 0xB3, 0xB2, 0xB1],
+        "stale entries stay listed behind the newest one"
+    );
+    assert_eq!(
+        after[0].hash, 0xB4,
+        "the margin widget switches to the new diagram (index 0) with no \
+         selection to go stale"
+    );
+
+    crate::tui::mermaid::clear_active_diagrams();
+}
+
+/// Margin-mode counterpart of the transcript-clear leak: after a session
+/// switch removes the plan-graph transcript message, the Margin info widget
+/// STILL lists (and therefore renders) the orphaned diagram, because nothing
+/// re-scopes ACTIVE_DIAGRAMS (mermaid_active.rs) on session change.
+#[test]
+fn test_margin_mode_session_switch_keeps_orphaned_diagram_in_info_widget() {
+    let _render_lock = scroll_render_test_lock();
+    let _mode_guard = DiagramModeOverrideGuard::margin();
+    let mut app = create_test_app();
+    app.diagram_mode = crate::config::DiagramDisplayMode::Margin;
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.enter();
+    let mut remote = crate::tui::backend::RemoteConnection::dummy();
+    remote.mark_history_loaded();
+
+    app.remote_session_id = Some("session_old".to_string());
+    let stale_hash = seed_rendered_plan_graph(&mut app, &mut remote);
+
+    app.handle_server_event(history_event_for_session("session_new"), &mut remote);
+    assert!(
+        plan_graph_titles(&app).is_empty(),
+        "session switch removes the plan-graph transcript message"
+    );
+
+    let diagrams = crate::tui::TuiState::info_widget_data(&app).diagrams;
+    assert_eq!(
+        diagrams.len(),
+        1,
+        "LEAK CONFIRMED in Margin mode: the info widget still lists the \
+         previous session's diagram"
+    );
+    assert_eq!(
+        diagrams[0].hash, stale_hash,
+        "the margin widget would render exactly the orphaned session-A plan graph"
     );
 
     crate::tui::mermaid::clear_active_diagrams();
