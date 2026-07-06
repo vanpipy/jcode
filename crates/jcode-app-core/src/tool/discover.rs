@@ -108,6 +108,11 @@ impl Tool for DiscoverToolsTool {
         .await?;
         let rendered = render_listing(&category, &listing)?;
 
+        // Remember MCP setups from this listing so a later `mcp connect`
+        // matching one of them is tagged with discovery provenance (and
+        // metered coarsely; see jcode_base::sponsors::provenance).
+        crate::sponsors::provenance::record_discovered_setups(extract_mcp_setups(&listing));
+
         Ok(ToolOutput::new(rendered)
             .with_title(format!(
                 "{} {}",
@@ -168,6 +173,36 @@ async fn fetch_listing(
     }
     serde_json::from_str(&body)
         .map_err(|err| anyhow::anyhow!("discovery returned invalid JSON: {err}"))
+}
+
+/// Extract structured MCP setups (`mcp: { command, args }`) from a listing
+/// for provenance matching. Entries without an `mcp` descriptor are skipped.
+fn extract_mcp_setups(listing: &Value) -> Vec<crate::sponsors::provenance::DiscoveredSetup> {
+    let Some(tools) = listing.get("tools").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let sponsor = tool.get("name")?.as_str()?.trim().to_ascii_lowercase();
+            let mcp = tool.get("mcp")?;
+            let command = mcp.get("command")?.as_str()?.to_string();
+            let args = mcp
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|a| a.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(crate::sponsors::provenance::DiscoveredSetup {
+                sponsor,
+                command,
+                args,
+            })
+        })
+        .collect()
 }
 
 /// Render a discovery listing for the model. Expected manifest shape:
