@@ -122,7 +122,10 @@ pub(super) async fn run_swarm_replay(
     let mut should_quit = false;
 
     loop {
-        terminal.draw(|frame| draw_swarm_replay_frame(frame, &mut panes, sim_time_ms))?;
+        terminal.draw(|frame| {
+            draw_swarm_replay_frame(frame, &mut panes, sim_time_ms);
+            jcode_tui_style::adapt_buffer_for_theme(frame.buffer_mut());
+        })?;
 
         if should_quit {
             break;
