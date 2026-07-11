@@ -41,6 +41,19 @@ pub const DISCOVERY_CATEGORIES: &[&str] = &[
     "databases",
     "browser-automation",
     "deployment",
+    "observability",
+    "authentication",
+    "security",
+    "storage",
+    "analytics",
+    "web-search",
+    "web-data",
+    "cloud-infrastructure",
+    "compliance-and-privacy",
+    "integration-platforms",
+    "email-messaging",
+    "ai-models",
+    "other",
 ];
 
 /// Build the system prompt section advertising discoverable tool categories.
@@ -73,6 +86,33 @@ mod tests {
             assert_eq!(cat.to_ascii_lowercase(), *cat);
             assert!(!cat.contains(' '), "categories are slugs: {cat}");
         }
+    }
+
+    #[test]
+    fn categories_match_the_public_discovery_taxonomy() {
+        assert_eq!(
+            DISCOVERY_CATEGORIES,
+            &[
+                "payments",
+                "code-review",
+                "databases",
+                "browser-automation",
+                "deployment",
+                "observability",
+                "authentication",
+                "security",
+                "storage",
+                "analytics",
+                "web-search",
+                "web-data",
+                "cloud-infrastructure",
+                "compliance-and-privacy",
+                "integration-platforms",
+                "email-messaging",
+                "ai-models",
+                "other",
+            ]
+        );
     }
 
     #[test]
