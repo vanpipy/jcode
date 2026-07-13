@@ -22,6 +22,21 @@ const DPI_QUANTUM: u16 = 12;
 static LOG_HOOK: LazyLock<Mutex<fn(&str)>> = LazyLock::new(|| Mutex::new(|_| {}));
 static LAST_REPORTED_ERROR: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 
+#[cfg(test)]
+thread_local! {
+    static TEST_RENDER_ATTEMPTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_test_render_attempts() {
+    TEST_RENDER_ATTEMPTS.with(|attempts| attempts.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn test_render_attempts() -> u64 {
+    TEST_RENDER_ATTEMPTS.with(std::cell::Cell::get)
+}
+
 pub(crate) fn set_log_hook(hook: fn(&str)) {
     if let Ok(mut current) = LOG_HOOK.lock() {
         *current = hook;
@@ -77,6 +92,8 @@ pub(super) fn render_latex_image(
     display: bool,
     max_width: Option<usize>,
 ) -> Result<Vec<Line<'static>>, String> {
+    #[cfg(test)]
+    TEST_RENDER_ATTEMPTS.with(|attempts| attempts.set(attempts.get().saturating_add(1)));
     if !super::mermaid::image_protocol_available() {
         return Err("terminal image protocol unavailable".to_string());
     }
