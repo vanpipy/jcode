@@ -127,7 +127,7 @@ measurement-sensitive. jcode records discovery provenance only when a later MCP
 connection exactly matches both values. A prose `setup` string alone does not
 enable provenance tagging or coarse usage metering.
 
-## 4. Implement the two API phases
+## 4. Implement browse, select, and catalog suggestions
 
 The default client sends `GET https://api.jcode.sh/v1/discovery` with a
 three-second timeout and a 64 KiB maximum response. It sends a
@@ -139,20 +139,21 @@ Runs launched by `scripts/benchmark_discovery.py` also send
 request logs so benchmark traffic can be excluded from ordinary discovery and
 sponsor reporting.
 
-The request query parameters are:
+Browse and select use these query parameters:
 
 | Parameter | Phase | Meaning |
 |-----------|-------|---------|
-| `category` | Both | Required category slug. |
-| `q` | Both | Required capability summary, 20-500 characters. It must be specific enough to describe the missing capability without copying user text. |
-| `reason` | Both | Required rationale, 40-2,000 characters. Browse explains why the capability is needed. Select explains why the chosen tool fits better than the listed alternatives. |
+| `category` | Browse/select | Required category slug. |
+| `q` | Browse/select | Required capability summary, 20-500 characters. It must be specific enough to describe the missing capability without copying user text. |
+| `reason` | Browse/select | Required rationale, 40-2,000 characters. Browse explains why the capability is needed. Select explains why the chosen tool fits better than the listed alternatives. |
 | `tool` | Select | Canonical name chosen from a previous browse response. Its presence selects the second phase. |
 
-The model-facing schema explicitly says that `q` and `reason` are sent to the
-Discovery service and relevant sponsors for demand and selection reporting. It
-also tells the model to write a fresh summary, not copy user text, and never
-include secrets, credentials, personal data, or private content. Both fields are
-schema-required and include the same length bounds enforced at runtime.
+The model-facing schema explicitly says browse/select `q` and `reason` may be
+sent to relevant sponsors for demand and selection reporting. Catalog
+suggestions are sent only to Jcode maintainers. The schema tells the model to
+write fresh summaries, not copy user text, and never include secrets,
+credentials, personal data, or private content. Both fields remain required and
+use the same length bounds in all three actions.
 
 The client rejects missing, blank, short, oversized, padded low-information,
 or recognizably sensitive text before making a network request. The service repeats the validation before
@@ -187,8 +188,9 @@ Browse returns eligible tools without setup instructions or MCP launch data:
 ```
 
 Return `{"tools": []}` when no entry is eligible. Do not return `setup` or
-`mcp` during browse. The two-phase design requires a specific selection and
-reason before setup is revealed.
+`mcp` during browse. Setup still requires a specific selection and reason.
+Every browse response must expose its request ID so the agent can reference it
+if no listed tool is suitable.
 
 ### Select response
 
@@ -213,6 +215,24 @@ Use a non-2xx response for an unknown category, unknown tool, invalid request,
 or service failure. Never silently substitute another sponsor. Keep total JSON
 below 64 KiB and avoid redirects because they make behavior harder to audit.
 
+### Catalog suggestion response
+
+When browse results are empty or unsuitable, the agent may send
+`POST /v1/discovery/suggestions`. The JSON body includes `category`, `query`,
+`reason`, `prior_request_id`, and `suggestion_kind` (`known_product` or
+`capability_gap`). A known product also requires `product_name` and may include
+a public HTTPS `product_url`. Both kinds may include concise `gap_evidence` and
+up to eight public `requirements`.
+
+The service must verify that `prior_request_id` names a successful browse in
+the same category, allow at most one suggestion per browse, synchronously
+persist the suggestion before acknowledging it, and apply the same sensitive
+data validation to every text field. Return `202` with
+`{"suggestion_id":"...","status":"received"}`. A duplicate submission may
+return `409` with `status: "duplicate"`; the client treats that as a successful
+receipt. Suggestions go only to Jcode maintainers, never to sponsors. Receipt
+does not imply approval, sponsorship, implementation, or availability.
+
 ## 5. Validate before production
 
 First validate the service directly. Use generic test text because `q` and
@@ -231,6 +251,17 @@ curl --fail-with-body --get "$DISCOVERY_URL" \
   --data-urlencode 'tool=example-tool' \
   --data-urlencode 'q=managed postgres for a disposable test application' \
   --data-urlencode 'reason=selected for staging validation after reviewing the listed database options'
+
+curl --fail-with-body --request POST "$DISCOVERY_URL/suggestions" \
+  --header 'content-type: application/json' \
+  --data '{
+    "category":"databases",
+    "query":"managed postgres branching with scoped agent provisioning",
+    "reason":"none of the current database entries satisfy the isolated branch requirement",
+    "suggestion_kind":"capability_gap",
+    "prior_request_id":"<browse request ID>",
+    "requirements":["Create isolated branches without exposing administrator credentials"]
+  }'
 ```
 
 Verify all of the following:
@@ -245,6 +276,10 @@ Verify all of the following:
   text is rejected before raw event storage;
 - a configured sponsor recipient receives both browse and select summaries, but
   the same requests with the benchmark header produce no sponsor delivery;
+- suggest requires a prior successful browse in the same category, persists one
+  actionable proposal per browse, and sends it only to Jcode maintainers;
+- suggestion receipts clearly state that the proposed product or capability is
+  not approved or available yet;
 - the request ID appears in service logs and can be correlated for reliability
   debugging without a persistent user identifier; and
 - disabling the catalog entry removes it from browse and prevents selection.
@@ -257,12 +292,16 @@ enabled = true
 endpoint = "https://staging.example.com/v1/discovery"
 ```
 
-In a disposable jcode session, browse the category, select the sponsor, and, if
-applicable, connect the advertised MCP server. Confirm:
+In a disposable jcode session, browse the category, select the sponsor or submit
+a suggestion when no entry fits, and, if applicable, connect the advertised MCP
+server. Confirm:
 
 - the first discovery use displays `(sponsored discovery)`;
 - the browse output says placement does not imply preference;
 - setup appears only after selection;
+- browse, select, and suggest render distinct compact cards, with suggestions
+  naming their kind, capability, gap, requirements, status, and maintainer-only
+  recipient policy;
 - consequential next actions still request confirmation and mention the
   sponsorship;
 - an MCP connection using the exact structured command and arguments displays

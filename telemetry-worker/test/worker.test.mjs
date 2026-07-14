@@ -206,6 +206,26 @@ test("discovery event is validated, firehosed, and persisted to details", async 
   assert.ok(!detailInsert.values.some((value) => String(value).includes("virtual card")));
 });
 
+test("discovery telemetry accepts the catalog suggest phase", async () => {
+  const db = makeDb();
+  const discoveryFirehose = makeFirehose();
+  const response = await worker.fetch(
+    postRequest(makeDiscoveryBody({
+      phase: "suggest",
+      selected_tool: null,
+      http_status: 202,
+      result_count: 1,
+    })),
+    { DB: db, FIREHOSE_DISCOVERY: discoveryFirehose },
+    makeCtx(),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(discoveryFirehose.points[0].blobs[8], "suggest");
+  const detailInsert = db.executed.find(({ sql }) => /INSERT OR IGNORE INTO discovery_details/.test(sql));
+  const columns = detailInsert.sql.match(/\(([^)]+)\)/)[1].split(", ");
+  assert.equal(detailInsert.values[columns.indexOf("phase")], "suggest");
+});
+
 test("discovery event rejects unknown failure classifications", async () => {
   const response = await worker.fetch(
     postRequest(makeDiscoveryBody({ outcome: "failure", failure_reason: "raw secret error" })),

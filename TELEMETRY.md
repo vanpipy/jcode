@@ -66,7 +66,7 @@ without exposing prompts or a persistent telemetry identifier to that service.
 |-------|---------|----------|
 | `event` | `"discovery"` | Event type |
 | `request_id` | `"9a23..."` | Random correlation ID scoped to one request |
-| `phase` | `"browse"` / `"select"` / `"unknown"` | Discovery funnel stage |
+| `phase` | `"browse"` / `"select"` / `"suggest"` / `"unknown"` | Discovery funnel stage; `suggest` records a missing catalog capability proposal |
 | `category` | `"payments"` | Fixed discovery category, when valid |
 | `selected_tool` | `"agentcard"` | Public catalog tool name in the select phase |
 | `outcome` | `"success"` / `"failure"` | Attempt result |
