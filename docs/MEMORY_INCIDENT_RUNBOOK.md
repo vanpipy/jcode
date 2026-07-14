@@ -48,6 +48,15 @@ python scripts/analyze_runtime_memory_log.py --days 1
 
 The analyzer selects the latest server and client process instances by default. This is important because comparing PSS across a server reload produces false spikes. Use `--all-instances` only for explicit cross-instance forensics.
 
+List recorded process lifetimes and select a pre-reload incident directly:
+
+```bash
+python scripts/analyze_runtime_memory_log.py --days 1 --list-instances
+python scripts/analyze_runtime_memory_log.py --days 1 --instance <server-instance-id>
+```
+
+Prefer `--instance` for postmortems. It preserves one coherent process lifetime without mixing a high-memory server with its low-memory replacement.
+
 For machine-readable output:
 
 ```bash
