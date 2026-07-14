@@ -18,6 +18,7 @@ include!("tests/remote_startup_input_02/part_02.rs");
 include!("tests/remote_startup_input_03/part_01.rs");
 include!("tests/remote_startup_input_03/part_02.rs");
 include!("tests/remote_startup_input_04.rs");
+include!("tests/image_placeholder_commands.rs");
 include!("tests/remote_events_reload_01/part_01.rs");
 include!("tests/remote_events_reload_01/part_02.rs");
 include!("tests/remote_events_reload_02/part_01.rs");
@@ -841,6 +842,120 @@ fn skill_invocation_with_prompt_activates_and_submits_in_one_turn() {
         submitted.content.as_slice(),
         [ContentBlock::Text { text, .. }] if text == "then type prompt here and all that"
     ));
+}
+
+#[test]
+fn skill_invocation_with_prompt_attaches_pending_image_to_user_message() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = temp.path().join(".jcode/skills/image-skill");
+    std::fs::create_dir_all(&skill_dir).expect("create skill dir");
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: image-skill\ndescription: Image attachment regression skill\n---\nUse it.\n",
+    )
+    .expect("write skill");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.pending_images = vec![("image/png".to_string(), "ZmFrZSBwbmcgYnl0ZXM=".to_string())];
+    app.input = "/image-skill describe this screenshot".to_string();
+    app.cursor_pos = app.input.len();
+
+    app.submit_input();
+
+    assert_eq!(app.active_skill.as_deref(), Some("image-skill"));
+    assert!(app.is_processing, "the trailing prompt should start a turn");
+    assert!(
+        app.pending_images.is_empty(),
+        "pending images must be consumed by the submitted turn"
+    );
+    let submitted = app
+        .session
+        .messages
+        .last()
+        .expect("submitted session message");
+    assert_eq!(submitted.role, Role::User);
+    assert!(matches!(
+        submitted.content.as_slice(),
+        [
+            ContentBlock::Image { media_type, data },
+            ContentBlock::Text { text, .. },
+        ] if media_type == "image/png"
+            && data == "ZmFrZSBwbmcgYnl0ZXM="
+            && text == "describe this screenshot"
+    ));
+}
+
+#[test]
+fn unknown_skill_invocation_surfaces_error_and_sends_nothing() {
+    let mut app = create_test_app();
+    let temp = tempfile::tempdir().expect("tempdir");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+    app.input = "/definitely-not-a-real-skill".to_string();
+    app.cursor_pos = app.input.len();
+    let session_messages_before = app.session.messages.len();
+
+    app.submit_input();
+
+    assert!(!app.is_processing, "unknown skill must not start a turn");
+    assert_eq!(
+        app.session.messages.len(),
+        session_messages_before,
+        "no message should be sent to the model"
+    );
+    assert!(app.active_skill.is_none());
+    let last = app.display_messages().last().expect("error message");
+    assert_eq!(last.role, "error");
+    assert_eq!(last.content, "Unknown skill: /definitely-not-a-real-skill");
+}
+
+#[test]
+fn endorsed_but_not_installed_skill_invocation_surfaces_install_hint() {
+    let mut app = create_test_app();
+    // Empty working dir so no endorsed skill is actually installed there.
+    let temp = tempfile::tempdir().expect("tempdir");
+    app.session.working_dir = Some(temp.path().to_string_lossy().to_string());
+
+    let endorsed = crate::skill::endorsed_skills()
+        .iter()
+        .find(|endorsed| {
+            endorsed.install.is_some() && app.current_skills_snapshot().get(endorsed.name).is_none()
+        })
+        .expect("an endorsed skill with an install hint that is not installed");
+
+    app.input = format!("/{}", endorsed.name);
+    app.cursor_pos = app.input.len();
+    let session_messages_before = app.session.messages.len();
+
+    app.submit_input();
+
+    assert!(!app.is_processing, "missing skill must not start a turn");
+    assert_eq!(
+        app.session.messages.len(),
+        session_messages_before,
+        "no message should be sent to the model"
+    );
+    assert!(app.active_skill.is_none());
+    let last = app.display_messages().last().expect("error message");
+    assert_eq!(last.role, "error");
+    assert!(
+        last.content.contains(&format!(
+            "Skill /{} is endorsed but not installed",
+            endorsed.name
+        )),
+        "{}",
+        last.content
+    );
+    assert!(
+        last.content
+            .contains(&format!("`{}`", endorsed.install.unwrap())),
+        "install hint missing from: {}",
+        last.content
+    );
+    assert!(
+        !last.content.contains("Unknown skill"),
+        "endorsed skill must not be reported as a typo: {}",
+        last.content
+    );
 }
 
 #[test]
