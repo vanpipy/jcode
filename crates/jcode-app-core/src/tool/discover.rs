@@ -46,6 +46,16 @@ struct DiscoveryFetchError {
     response_bytes: Option<u64>,
 }
 
+struct DiscoveryRequestContext<'a> {
+    client: &'a reqwest::Client,
+    endpoint: &'a str,
+    request_id: &'a str,
+    category: &'a str,
+    query: &'a str,
+    reason: &'a str,
+    benchmark_run: bool,
+}
+
 impl fmt::Display for DiscoveryFetchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.message)
@@ -447,7 +457,7 @@ fn looks_like_payment_card(candidate: &str) -> bool {
         }
         sum += digit;
     }
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 #[async_trait]
@@ -681,21 +691,19 @@ impl Tool for DiscoverToolsTool {
             .filter(|t| !t.is_empty())
             .map(str::to_ascii_lowercase);
         let action = DiscoveryAction::parse(params.action.as_deref(), tool_selection.is_some())?;
+        let discovery_request = DiscoveryRequestContext {
+            client: &self.client,
+            endpoint: &endpoint,
+            request_id: &request_id,
+            category: &category,
+            query: &query,
+            reason: &reason,
+            benchmark_run,
+        };
 
         if action == DiscoveryAction::Suggest {
             let suggestion = validate_suggestion(&params)?;
-            let fetched = match submit_suggestion(
-                &self.client,
-                &endpoint,
-                &request_id,
-                &category,
-                &query,
-                &reason,
-                &suggestion,
-                benchmark_run,
-            )
-            .await
-            {
+            let fetched = match submit_suggestion(&discovery_request, &suggestion).await {
                 Ok(result) => result,
                 Err(err) => {
                     record_discovery_telemetry(
@@ -746,18 +754,7 @@ impl Tool for DiscoverToolsTool {
         // Select phase: return one tool's full setup instructions. The
         // selection (and the agent's reason for it) is recorded server-side.
         if let Some(tool_name) = tool_selection {
-            let fetched = match fetch_listing(
-                &self.client,
-                &endpoint,
-                &request_id,
-                &category,
-                &query,
-                &reason,
-                Some(&tool_name),
-                benchmark_run,
-            )
-            .await
-            {
+            let fetched = match fetch_listing(&discovery_request, Some(&tool_name)).await {
                 Ok(result) => result,
                 Err(err) => {
                     record_discovery_telemetry(
@@ -839,18 +836,7 @@ impl Tool for DiscoverToolsTool {
                 })));
         }
 
-        let fetched = match fetch_listing(
-            &self.client,
-            &endpoint,
-            &request_id,
-            &category,
-            &query,
-            &reason,
-            None,
-            benchmark_run,
-        )
-        .await
-        {
+        let fetched = match fetch_listing(&discovery_request, None).await {
             Ok(result) => result,
             Err(err) => {
                 record_discovery_telemetry(
@@ -937,29 +923,28 @@ impl Tool for DiscoverToolsTool {
 /// required reason string, and the selected tool name only. Hard fails on
 /// any error: no cache, no fallback, no retry.
 async fn fetch_listing(
-    client: &reqwest::Client,
-    endpoint: &str,
-    request_id: &str,
-    category: &str,
-    query: &str,
-    reason: &str,
+    context: &DiscoveryRequestContext<'_>,
     tool: Option<&str>,
-    benchmark_run: bool,
 ) -> std::result::Result<DiscoveryFetchResult, DiscoveryFetchError> {
-    let endpoint = endpoint.trim_end_matches('/');
-    let mut request = client
+    let endpoint = context.endpoint.trim_end_matches('/');
+    let mut request = context
+        .client
         .get(endpoint)
-        .query(&[("category", category), ("q", query), ("reason", reason)])
+        .query(&[
+            ("category", context.category),
+            ("q", context.query),
+            ("reason", context.reason),
+        ])
         .header(
             reqwest::header::USER_AGENT,
             format!("jcode/{}", env!("CARGO_PKG_VERSION")),
         )
-        .header(DISCOVERY_REQUEST_ID_HEADER, request_id)
+        .header(DISCOVERY_REQUEST_ID_HEADER, context.request_id)
         .timeout(DISCOVERY_TIMEOUT);
     if let Some(tool) = tool.filter(|t| !t.trim().is_empty()) {
         request = request.query(&[("tool", tool.trim())]);
     }
-    if benchmark_run {
+    if context.benchmark_run {
         request = request.header(DISCOVERY_BENCHMARK_HEADER, "1");
     }
 
@@ -1012,27 +997,22 @@ async fn fetch_listing(
 }
 
 async fn submit_suggestion(
-    client: &reqwest::Client,
-    endpoint: &str,
-    request_id: &str,
-    category: &str,
-    query: &str,
-    reason: &str,
+    context: &DiscoveryRequestContext<'_>,
     suggestion: &ValidatedSuggestion,
-    benchmark_run: bool,
 ) -> std::result::Result<DiscoveryFetchResult, DiscoveryFetchError> {
-    let endpoint = format!("{}/suggestions", endpoint.trim_end_matches('/'));
-    let mut request = client
+    let endpoint = format!("{}/suggestions", context.endpoint.trim_end_matches('/'));
+    let mut request = context
+        .client
         .post(endpoint)
         .header(
             reqwest::header::USER_AGENT,
             format!("jcode/{}", env!("CARGO_PKG_VERSION")),
         )
-        .header(DISCOVERY_REQUEST_ID_HEADER, request_id)
+        .header(DISCOVERY_REQUEST_ID_HEADER, context.request_id)
         .json(&json!({
-            "category": category,
-            "query": query,
-            "reason": reason,
+            "category": context.category,
+            "query": context.query,
+            "reason": context.reason,
             "suggestion_kind": suggestion.kind,
             "product_name": suggestion.product_name,
             "product_url": suggestion.product_url,
@@ -1041,7 +1021,7 @@ async fn submit_suggestion(
             "prior_request_id": suggestion.prior_request_id,
         }))
         .timeout(DISCOVERY_TIMEOUT);
-    if benchmark_run {
+    if context.benchmark_run {
         request = request.header(DISCOVERY_BENCHMARK_HEADER, "1");
     }
     let response = request.send().await.map_err(|err| DiscoveryFetchError {
@@ -1763,23 +1743,30 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    fn test_discovery_request<'a>(
+        client: &'a reqwest::Client,
+        endpoint: &'a str,
+        request_id: &'a str,
+        benchmark_run: bool,
+    ) -> DiscoveryRequestContext<'a> {
+        DiscoveryRequestContext {
+            client,
+            endpoint,
+            request_id,
+            category: "payments",
+            query: "virtual card for checkout",
+            reason: "task needs an online payment capability",
+            benchmark_run,
+        }
+    }
+
     #[tokio::test]
     async fn fetch_listing_round_trips_and_sends_only_expected_params() {
         let body = json!({"tools": [{"name": "agentcard", "blurb": "virtual cards", "url": "https://a.example"}]}).to_string();
         let (endpoint, server) = one_shot_server("HTTP/1.1 200 OK", body).await;
         let client = reqwest::Client::new();
-        let listing = fetch_listing(
-            &client,
-            &endpoint,
-            "request-test-1",
-            "payments",
-            "virtual card for checkout",
-            "task needs an online payment capability",
-            None,
-            true,
-        )
-        .await
-        .unwrap();
+        let request = test_discovery_request(&client, &endpoint, "request-test-1", true);
+        let listing = fetch_listing(&request, None).await.unwrap();
         assert_eq!(listing.listing["tools"][0]["name"], "agentcard");
         assert_eq!(listing.http_status, 200);
         assert!(listing.response_bytes > 0);
@@ -1809,18 +1796,8 @@ mod tests {
         let (endpoint, _server) =
             one_shot_server("HTTP/1.1 500 Internal Server Error", "{}".to_string()).await;
         let client = reqwest::Client::new();
-        let err = fetch_listing(
-            &client,
-            &endpoint,
-            "request-test-2",
-            "payments",
-            "virtual card for checkout",
-            "task needs an online payment capability",
-            None,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let request = test_discovery_request(&client, &endpoint, "request-test-2", false);
+        let err = fetch_listing(&request, None).await.unwrap_err();
         assert!(err.to_string().contains("discovery unavailable"));
         assert_eq!(err.failure_reason, "http_error");
         assert_eq!(err.http_status, Some(500));
@@ -1830,18 +1807,9 @@ mod tests {
     async fn fetch_listing_hard_fails_when_endpoint_unreachable() {
         // Reserved port with no listener: connection refused, no fallback.
         let client = reqwest::Client::new();
-        let err = fetch_listing(
-            &client,
-            "http://127.0.0.1:9",
-            "request-test-3",
-            "payments",
-            "virtual card for checkout",
-            "task needs an online payment capability",
-            None,
-            false,
-        )
-        .await
-        .unwrap_err();
+        let request =
+            test_discovery_request(&client, "http://127.0.0.1:9", "request-test-3", false);
+        let err = fetch_listing(&request, None).await.unwrap_err();
         assert!(err.to_string().contains("discovery unavailable"));
         assert_eq!(err.failure_reason, "connect_error");
     }
@@ -1865,18 +1833,17 @@ mod tests {
             requirements: vec!["Scoped test-mode access".to_string()],
             prior_request_id: "11111111-2222-4333-8444-555555555555".to_string(),
         };
-        let result = submit_suggestion(
-            &reqwest::Client::new(),
-            &endpoint,
-            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-            "payments",
-            "manage Stripe sandbox products through scoped agent access",
-            "the current payment listing only provides cards and cannot manage Stripe test data",
-            &suggestion,
-            true,
-        )
-        .await
-        .unwrap();
+        let client = reqwest::Client::new();
+        let request = DiscoveryRequestContext {
+            client: &client,
+            endpoint: &endpoint,
+            request_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            category: "payments",
+            query: "manage Stripe sandbox products through scoped agent access",
+            reason: "the current payment listing only provides cards and cannot manage Stripe test data",
+            benchmark_run: true,
+        };
+        let result = submit_suggestion(&request, &suggestion).await.unwrap();
         assert_eq!(result.http_status, 202);
         assert_eq!(result.listing["status"], "received");
 
@@ -1917,18 +1884,17 @@ mod tests {
             requirements: Vec::new(),
             prior_request_id: "11111111-2222-4333-8444-555555555555".to_string(),
         };
-        let result = submit_suggestion(
-            &reqwest::Client::new(),
-            &endpoint,
-            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
-            "payments",
-            "manage Stripe sandbox products through scoped agent access",
-            "the current payment listing only provides cards and cannot manage Stripe test data",
-            &suggestion,
-            false,
-        )
-        .await
-        .unwrap();
+        let client = reqwest::Client::new();
+        let request = DiscoveryRequestContext {
+            client: &client,
+            endpoint: &endpoint,
+            request_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            category: "payments",
+            query: "manage Stripe sandbox products through scoped agent access",
+            reason: "the current payment listing only provides cards and cannot manage Stripe test data",
+            benchmark_run: false,
+        };
+        let result = submit_suggestion(&request, &suggestion).await.unwrap();
         assert_eq!(result.http_status, 409);
         assert_eq!(result.listing["status"], "duplicate");
     }
