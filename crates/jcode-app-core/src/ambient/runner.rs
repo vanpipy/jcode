@@ -645,7 +645,6 @@ impl AmbientRunnerHandle {
                         .queue()
                         .items()
                         .iter()
-                        .filter(|item| item.target.is_direct_delivery())
                         .map(|item| item.scheduled_for)
                         .min();
                     // Update queue info for widget
