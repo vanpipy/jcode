@@ -1003,7 +1003,7 @@ impl BashTool {
                 .await;
         }
 
-        let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
+        let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
         let timeout_duration = Duration::from_millis(timeout_ms);
 
         let has_stdin_channel = ctx.stdin_request_tx.is_some();
@@ -1220,7 +1220,7 @@ impl BashTool {
         params: &BashInput,
         ctx: &ToolContext,
     ) -> Result<ToolOutput> {
-        let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(600000);
+        let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
         let timeout_duration = Duration::from_millis(timeout_ms);
         let started_at = Utc::now().to_rfc3339();
         let started = Instant::now();
@@ -1370,7 +1370,7 @@ impl BashTool {
         let description = params.intent.clone();
         let display_name = summarize_background_command(description.as_deref(), &command);
         let working_dir = ctx.working_dir.clone();
-        let timeout_ms = params.timeout.map(|timeout| timeout.min(600000));
+        let timeout_ms = params.timeout;
         let timeout_duration = timeout_ms.map(Duration::from_millis);
 
         let wake = params.wake;
