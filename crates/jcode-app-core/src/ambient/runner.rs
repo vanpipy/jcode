@@ -589,6 +589,15 @@ impl AmbientRunnerHandle {
         ambient_tools::init_safety_system(Arc::clone(&self.inner.safety));
 
         loop {
+            // Refresh scheduler's interval config from live ambient config so
+            // that config.toml edits (or profile switches) take effect without
+            // requiring a serve restart. (Bug C fix — see
+            // notes/ambient-no-cycle-2026-09-28.md.)
+            let live_amb = &config().ambient;
+            scheduler.config.min_interval_minutes = live_amb.min_interval_minutes;
+            scheduler.config.max_interval_minutes = live_amb.max_interval_minutes;
+            scheduler.config.pause_on_active_session = live_amb.pause_on_active_session;
+
             // Check state
             let state = { self.inner.state.read().await.clone() };
 
