@@ -62,6 +62,8 @@ struct GoalInput {
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
+    priority: Option<String>,
+    #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     why: Option<String>,
@@ -77,6 +79,10 @@ struct GoalInput {
     current_milestone_id: Option<String>,
     #[serde(default)]
     progress_percent: Option<u8>,
+    #[serde(default)]
+    review_criteria: Option<Vec<String>>,
+    #[serde(default)]
+    review_max_retries: Option<u8>,
     #[serde(default)]
     checkpoint_summary: Option<String>,
     #[serde(default)]
@@ -128,6 +134,7 @@ impl Tool for InitiativeTool {
                 "title": {"type": "string"},
                 "scope": {"type": "string"},
                 "status": {"type": "string"},
+                "priority": {"type": "string", "enum": ["high", "medium", "low"]},
                 "description": {"type": "string"},
                 "why": {"type": "string"},
                 "success_criteria": {"type": "array", "items": {"type": "string"}},
@@ -136,6 +143,8 @@ impl Tool for InitiativeTool {
                 "blockers": {"type": "array", "items": {"type": "string"}},
                 "current_milestone_id": {"type": "string"},
                 "progress_percent": {"type": "integer"},
+                "review_criteria": {"type": "array", "items": {"type": "string"}},
+                "review_max_retries": {"type": "integer"},
                 "checkpoint_summary": {"type": "string"}
             }
         })
@@ -178,11 +187,16 @@ impl Tool for InitiativeTool {
                     .as_deref()
                     .and_then(crate::goal::GoalScope::parse)
                     .unwrap_or(crate::goal::GoalScope::Project);
+                let priority = params
+                    .priority
+                    .as_deref()
+                    .and_then(crate::goal::GoalPriority::parse);
                 let goal = crate::goal::create_goal(
                     crate::goal::GoalCreateInput {
                         id: params.id.clone(),
                         title: title.to_string(),
                         scope,
+                        priority,
                         description: params.description.clone(),
                         why: params.why.clone(),
                         success_criteria: params.success_criteria.unwrap_or_default(),
@@ -191,6 +205,8 @@ impl Tool for InitiativeTool {
                         blockers: params.blockers.unwrap_or_default(),
                         current_milestone_id: params.current_milestone_id.clone(),
                         progress_percent: params.progress_percent,
+                        review_criteria: params.review_criteria.unwrap_or_default(),
+                        review_max_retries: params.review_max_retries,
                     },
                     working_dir,
                 )?;
@@ -285,6 +301,10 @@ impl Tool for InitiativeTool {
                             .ok_or_else(|| anyhow::anyhow!("invalid goal status: {}", value))
                     })
                     .transpose()?;
+                let priority = params
+                    .priority
+                    .as_deref()
+                    .and_then(crate::goal::GoalPriority::parse);
                 let goal = crate::goal::update_goal(
                     id,
                     params
@@ -297,6 +317,7 @@ impl Tool for InitiativeTool {
                         description: params.description.clone(),
                         why: params.why.clone(),
                         status,
+                        priority,
                         success_criteria: params.success_criteria.clone(),
                         milestones: params.milestones.clone(),
                         next_steps: params.next_steps.clone(),
@@ -308,6 +329,12 @@ impl Tool for InitiativeTool {
                         },
                         progress_percent: if params.progress_percent.is_some() {
                             Some(params.progress_percent)
+                        } else {
+                            None
+                        },
+                        review_criteria: params.review_criteria.clone(),
+                        review_max_retries: if params.review_max_retries.is_some() {
+                            Some(params.review_max_retries)
                         } else {
                             None
                         },

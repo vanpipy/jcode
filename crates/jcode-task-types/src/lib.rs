@@ -32,6 +32,8 @@ pub enum GoalStatus {
     Draft,
     #[default]
     Active,
+    Pending,
+    NeedsDecision,
     Paused,
     Blocked,
     Completed,
@@ -44,6 +46,8 @@ impl GoalStatus {
         match value.trim().to_ascii_lowercase().as_str() {
             "draft" => Some(Self::Draft),
             "active" => Some(Self::Active),
+            "pending" => Some(Self::Pending),
+            "needs_decision" => Some(Self::NeedsDecision),
             "paused" => Some(Self::Paused),
             "blocked" => Some(Self::Blocked),
             "completed" => Some(Self::Completed),
@@ -57,6 +61,8 @@ impl GoalStatus {
         match self {
             Self::Draft => "draft",
             Self::Active => "active",
+            Self::Pending => "pending",
+            Self::NeedsDecision => "needs_decision",
             Self::Paused => "paused",
             Self::Blocked => "blocked",
             Self::Completed => "completed",
@@ -68,17 +74,57 @@ impl GoalStatus {
     pub fn sort_rank(self) -> u8 {
         match self {
             Self::Active => 0,
-            Self::Blocked => 1,
-            Self::Draft => 2,
-            Self::Paused => 3,
-            Self::Completed => 4,
-            Self::Archived => 5,
-            Self::Abandoned => 6,
+            Self::Pending => 1,
+            Self::Blocked => 2,
+            Self::Draft => 3,
+            Self::NeedsDecision => 4,
+            Self::Paused => 5,
+            Self::Completed => 6,
+            Self::Archived => 7,
+            Self::Abandoned => 8,
         }
     }
 
     pub fn is_resumable(self) -> bool {
-        matches!(self, Self::Active | Self::Blocked | Self::Draft)
+        matches!(self, Self::Active | Self::Pending | Self::Blocked | Self::Draft)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalPriority {
+    High,
+    #[default]
+    Medium,
+    Low,
+}
+
+impl GoalPriority {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "high" => Some(Self::High),
+            "medium" => Some(Self::Medium),
+            "low" => Some(Self::Low),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Medium => "medium",
+            Self::Low => "low",
+        }
+    }
+
+    /// Sort rank: lower = picked first. Used by orchestrators that want
+    /// queue head selection by priority.
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::High => 0,
+            Self::Medium => 1,
+            Self::Low => 2,
+        }
     }
 }
 
@@ -115,6 +161,8 @@ pub struct Goal {
     #[serde(default)]
     pub status: GoalStatus,
     #[serde(default)]
+    pub priority: GoalPriority,
+    #[serde(default)]
     pub description: String,
     #[serde(default)]
     pub why: String,
@@ -130,6 +178,12 @@ pub struct Goal {
     pub current_milestone_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_criteria: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_max_retries: Option<u8>,
+    #[serde(default)]
+    pub review_retry_count: u8,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -145,6 +199,7 @@ impl Goal {
             title: trimmed.to_string(),
             scope,
             status: GoalStatus::Active,
+            priority: GoalPriority::default(),
             description: String::new(),
             why: String::new(),
             success_criteria: Vec::new(),
@@ -153,6 +208,9 @@ impl Goal {
             blockers: Vec::new(),
             current_milestone_id: None,
             progress_percent: None,
+            review_criteria: Vec::new(),
+            review_max_retries: None,
+            review_retry_count: 0,
             created_at: now,
             updated_at: now,
             updates: Vec::new(),

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
-pub use jcode_task_types::{Goal, GoalMilestone, GoalScope, GoalStatus, GoalStep, GoalUpdate};
+pub use jcode_task_types::{Goal, GoalMilestone, GoalPriority, GoalScope, GoalStatus, GoalStep, GoalUpdate};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalDisplayMode {
@@ -31,6 +31,7 @@ pub struct GoalCreateInput {
     pub id: Option<String>,
     pub title: String,
     pub scope: GoalScope,
+    pub priority: Option<GoalPriority>,
     pub description: Option<String>,
     pub why: Option<String>,
     pub success_criteria: Vec<String>,
@@ -39,6 +40,8 @@ pub struct GoalCreateInput {
     pub blockers: Vec<String>,
     pub current_milestone_id: Option<String>,
     pub progress_percent: Option<u8>,
+    pub review_criteria: Vec<String>,
+    pub review_max_retries: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -47,12 +50,15 @@ pub struct GoalUpdateInput {
     pub description: Option<String>,
     pub why: Option<String>,
     pub status: Option<GoalStatus>,
+    pub priority: Option<GoalPriority>,
     pub success_criteria: Option<Vec<String>>,
     pub milestones: Option<Vec<GoalMilestone>>,
     pub next_steps: Option<Vec<String>>,
     pub blockers: Option<Vec<String>>,
     pub current_milestone_id: Option<Option<String>>,
     pub progress_percent: Option<Option<u8>>,
+    pub review_criteria: Option<Vec<String>>,
+    pub review_max_retries: Option<Option<u8>>,
     pub checkpoint_summary: Option<String>,
 }
 
@@ -81,6 +87,9 @@ pub fn create_goal(input: GoalCreateInput, working_dir: Option<&Path>) -> Result
         goal.id = jcode_task_types::sanitize_goal_id(id);
     }
     goal.id = next_available_goal_id(&goal.id, goal.scope, working_dir)?;
+    if let Some(priority) = input.priority {
+        goal.priority = priority;
+    }
     goal.description = input.description.unwrap_or_default().trim().to_string();
     goal.why = input.why.unwrap_or_default().trim().to_string();
     goal.success_criteria = trim_vec(input.success_criteria);
@@ -89,6 +98,8 @@ pub fn create_goal(input: GoalCreateInput, working_dir: Option<&Path>) -> Result
     goal.blockers = trim_vec(input.blockers);
     goal.current_milestone_id = input.current_milestone_id;
     goal.progress_percent = input.progress_percent.map(|p| p.min(100));
+    goal.review_criteria = trim_vec(input.review_criteria);
+    goal.review_max_retries = input.review_max_retries;
     goal.updated_at = Utc::now();
     save_goal(&goal, working_dir)?;
     sync_goal_memory(&goal, working_dir)?;
@@ -122,6 +133,9 @@ pub fn update_goal(
     if let Some(status) = update.status {
         goal.status = status;
     }
+    if let Some(priority) = update.priority {
+        goal.priority = priority;
+    }
     if let Some(criteria) = update.success_criteria {
         goal.success_criteria = trim_vec(criteria);
     }
@@ -139,6 +153,12 @@ pub fn update_goal(
     }
     if let Some(progress_percent) = update.progress_percent {
         goal.progress_percent = progress_percent.map(|p| p.min(100));
+    }
+    if let Some(review_criteria) = update.review_criteria {
+        goal.review_criteria = trim_vec(review_criteria);
+    }
+    if let Some(review_max_retries) = update.review_max_retries {
+        goal.review_max_retries = review_max_retries;
     }
     if let Some(summary) = update
         .checkpoint_summary
